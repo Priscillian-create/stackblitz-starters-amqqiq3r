@@ -995,7 +995,6 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
                     const fetchPromise = supabase
                         .from('sales')
                         .select('*')
-                        .is('deleted_at', null)
                         .order('created_at', { ascending: false })
                         .range(offset, offset + limit - 1);
                     let data, error;
