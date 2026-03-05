@@ -1717,7 +1717,7 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
             // Always save locally first
             const localResult = this.saveSaleLocally(sale);
   
-            if (isOnline) {
+            if (supabase && typeof supabase.from === 'function') {
                 try {
                     // Simplify the user ID validation
                     let validCashierId = currentUser?.id || '00000000-0000-0000-0000-000000000000';
