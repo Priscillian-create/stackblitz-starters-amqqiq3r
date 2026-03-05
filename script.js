@@ -1730,32 +1730,25 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
   
             if (supabase && typeof supabase.from === 'function') {
                 try {
-                    // Simplify the user ID validation
-                    let validCashierId = currentUser?.id || '00000000-0000-0000-0000-000000000000';
+                    let validCashierId = await ensureValidUserId(currentUser?.id);
                     
-                    // If it's not a valid UUID, use the fallback ID
-                    if (!validCashierId.match(/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i)) {
-                        validCashierId = '00000000-0000-0000-0000-000000000000';
-                    }
-                    
-                    // IMPORTANT: Use the correct database column names (lowercase)
                     const saleToSaveWithPM = {
-                        receiptnumber: sale.receiptNumber,  // Database column: receiptnumber
-                        cashierid: validCashierId,          // Database column: cashierid
+                        receiptnumber: sale.receiptNumber,
                         items: sale.items,
                         total: sale.total,
                         created_at: sale.created_at,
                         cashier: sale.cashier,
                         paymentmethod: sale.paymentMethod
                     };
+                    if (validCashierId) saleToSaveWithPM.cashierid = validCashierId;
                     const saleToSaveNoPM = {
                         receiptnumber: sale.receiptNumber,
-                        cashierid: validCashierId,
                         items: sale.items,
                         total: sale.total,
                         created_at: sale.created_at,
                         cashier: sale.cashier
                     };
+                    if (validCashierId) saleToSaveNoPM.cashierid = validCashierId;
                     const { data: exist, error: existErr } = await supabase
                         .from('sales')
                         .select('id')
@@ -1765,10 +1758,10 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
                         const index = sales.findIndex(s => s.receiptNumber === sale.receiptNumber);
                         if (index >= 0) {
                             sales[index].id = exist[0].id;
-                            sales[index].cashierId = validCashierId;
+                            if (validCashierId) sales[index].cashierId = validCashierId;
                             saveToLocalStorage();
                         }
-                        return { success: true, sale: { ...sale, id: exist[0].id, cashierId: validCashierId } };
+                        return { success: true, sale: { ...sale, id: exist[0].id, ...(validCashierId ? { cashierId: validCashierId } : {}) } };
                     }
                     let data, error;
                     try {
@@ -1837,10 +1830,10 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
                         const index = sales.findIndex(s => s.receiptNumber === sale.receiptNumber);
                         if (index >= 0) {
                             sales[index].id = data[0].id;
-                            sales[index].cashierId = validCashierId;
+                            if (validCashierId) sales[index].cashierId = validCashierId;
                             saveToLocalStorage();
                         }
-                        return { success: true, sale: { ...sale, id: data[0].id, cashierId: validCashierId } };
+                        return { success: true, sale: { ...sale, id: data[0].id, ...(validCashierId ? { cashierId: validCashierId } : {}) } };
                     } else {
                         throw new Error('No data returned from insert operation');
                     }
@@ -2186,7 +2179,7 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
                 .from('users')
                 .select('id')
                 .eq('id', userId)
-                .single();
+                .maybeSingle();
             
             if (!error && data) return userId;
         } catch (error) {
@@ -2200,7 +2193,7 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
                 .from('users')
                 .select('id')
                 .eq('email', currentUser.email)
-                .single();
+                .maybeSingle();
             
             if (!error && data) {
                 currentUser.id = data.id;
@@ -2212,7 +2205,7 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
         }
     }
     
-    return '00000000-0000-0000-0000-000000000000';
+    return null;
   }
   
   async function syncSale(operation) {
@@ -2221,33 +2214,31 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
         let validCashierId = await ensureValidUserId(candidateId);
         operation.data.cashierId = validCashierId;
         
-        // IMPORTANT: Use receiptnumber (lowercase) to match the database column
         const { data: existingSales, error: fetchError } = await supabase
             .from('sales')
             .select('*')
-            .eq('receiptnumber', operation.data.receiptNumber);  // Database column: receiptnumber
+            .eq('receiptnumber', operation.data.receiptNumber);
         
         if (fetchError) throw fetchError;
         
         if (!existingSales || existingSales.length === 0) {
-            // IMPORTANT: Use the correct database column names (lowercase)
             const saleToSaveWithPM = {
-                receiptnumber: operation.data.receiptNumber,  // Database column: receiptnumber
-                cashierid: validCashierId,                    // Database column: cashierid
+                receiptnumber: operation.data.receiptNumber,
                 items: operation.data.items,
                 total: operation.data.total,
                 created_at: operation.data.created_at,
                 cashier: operation.data.cashier,
                 paymentmethod: operation.data.paymentMethod
             };
+            if (validCashierId) saleToSaveWithPM.cashierid = validCashierId;
             const saleToSaveNoPM = {
                 receiptnumber: operation.data.receiptNumber,
-                cashierid: validCashierId,
                 items: operation.data.items,
                 total: operation.data.total,
                 created_at: operation.data.created_at,
                 cashier: operation.data.cashier
             };
+            if (validCashierId) saleToSaveNoPM.cashierid = validCashierId;
             
             let data, error;
             try {
@@ -2339,39 +2330,58 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
   async function syncProduct(operation) {
     try {
         if (operation.data.stock !== undefined && !operation.data.name) {
-            // IMPORTANT: Use the correct database column names (lowercase)
-            const { error } = await supabase
-                .from('products')
-                .update({ stock: operation.data.stock })
-                .eq('id', operation.data.id);
-            
-            if (error) throw error;
+            try {
+                const { error } = await supabase
+                    .from('products')
+                    .update({ stock: operation.data.stock })
+                    .eq('id', operation.data.id);
+                if (error) {
+                    if (error.code === '42703' && /updated_at/i.test(error.message || '')) {
+                        return true;
+                    }
+                    throw error;
+                }
+            } catch (e) {
+                if (e && e.code === '42703' && /updated_at/i.test(e.message || '')) {
+                    return true;
+                }
+                throw e;
+            }
         } else {
             if (operation.data.id && !operation.data.id.startsWith('temp_')) {
-                // IMPORTANT: Use the correct database column names (lowercase)
                 const productToSave = {
                     name: operation.data.name,
                     category: operation.data.category,
                     price: operation.data.price,
                     stock: operation.data.stock,
-                    expirydate: operation.data.expiryDate,  // Database column: expirydate
+                    expirydate: operation.data.expiryDate,
                     barcode: operation.data.barcode
                 };
                 
-                const { error } = await supabase
-                    .from('products')
-                    .update(productToSave)
-                    .eq('id', operation.data.id);
-                
-                if (error) throw error;
+                try {
+                    const { error } = await supabase
+                        .from('products')
+                        .update(productToSave)
+                        .eq('id', operation.data.id);
+                    if (error) {
+                        if (error.code === '42703' && /updated_at/i.test(error.message || '')) {
+                            return true;
+                        }
+                        throw error;
+                    }
+                } catch (e) {
+                    if (e && e.code === '42703' && /updated_at/i.test(e.message || '')) {
+                        return true;
+                    }
+                    throw e;
+                }
             } else {
-                // IMPORTANT: Use the correct database column names (lowercase)
                 const productToSave = {
                     name: operation.data.name,
                     category: operation.data.category,
                     price: operation.data.price,
                     stock: operation.data.stock,
-                    expirydate: operation.data.expiryDate,  // Database column: expirydate
+                    expirydate: operation.data.expiryDate,
                     barcode: operation.data.barcode
                 };
                 // Check if a matching product already exists (avoid double insert)
@@ -2406,12 +2416,24 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
                     }
                 } catch (_) {}
   
-                const { data, error } = await supabase
-                    .from('products')
-                    .upsert(productToSave, { onConflict: productToSave.barcode ? 'barcode' : undefined })
-                    .select();
-                
-                if (error) throw error;
+                let data, error;
+                try {
+                    ({ data, error } = await supabase
+                        .from('products')
+                        .upsert(productToSave, { onConflict: productToSave.barcode ? 'barcode' : undefined })
+                        .select());
+                    if (error) {
+                        if (error.code === '42703' && /updated_at/i.test(error.message || '')) {
+                            return true;
+                        }
+                        throw error;
+                    }
+                } catch (e) {
+                    if (e && e.code === '42703' && /updated_at/i.test(e.message || '')) {
+                        return true;
+                    }
+                    throw e;
+                }
                 
         if (data && data.length > 0) {
             const localProductIndex = products.findIndex(p => p.id === operation.data.id);
