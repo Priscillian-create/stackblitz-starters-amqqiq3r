@@ -6632,9 +6632,30 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
         showNotification('Pending offline operations; cannot clear now', 'error');
         return;
       }
-      try { await refreshAllData(); } catch (_) {}
+      let serverProducts = products, serverSales = sales, serverDeleted = deletedSales, serverExpenses = expenses, serverPurchases = purchases;
+      try {
+        serverProducts = await DataModule.fetchAllProducts();
+      } catch (_) {}
+      try {
+        serverSales = await DataModule.fetchSales();
+      } catch (_) {}
+      try {
+        serverDeleted = await DataModule.fetchDeletedSales();
+      } catch (_) {}
+      try {
+        serverExpenses = await DataModule.fetchExpenses();
+      } catch (_) {}
+      try {
+        serverPurchases = await DataModule.fetchPurchases();
+      } catch (_) {}
+      const hadLocalSales = Array.isArray(sales) && sales.length > 0;
+      const serverHasSales = Array.isArray(serverSales) && serverSales.length > 0;
+      if (hadLocalSales && !serverHasSales) {
+        showNotification('Server has no sales; preserving local sales', 'warning');
+        return;
+      }
       const keys = [
-        STORAGE_KEYS.PRODUCTS, STORAGE_KEYS.SALES, STORAGE_KEYS.DELETED_SALES, STORAGE_KEYS.USERS,
+        STORAGE_KEYS.PRODUCTS, STORAGE_KEYS.USERS,
         STORAGE_KEYS.SETTINGS, STORAGE_KEYS.CURRENT_USER, STORAGE_KEYS.EXPENSES, STORAGE_KEYS.PURCHASES,
         STORAGE_KEYS.STOCK_ALERTS, STORAGE_KEYS.PROFIT_DATA, STORAGE_KEYS.PRODUCTS_SYNC_TS, STORAGE_KEYS.SALES_SYNC_TS,
         'acknowledgedAlerts','resolvedDiscrepancies','syncQueue','ARCHIVE_ENABLED'
@@ -6642,7 +6663,15 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
       for (let i = 0; i < keys.length; i++) {
         try { localStorage.removeItem(keys[i]); } catch (_) {}
       }
-      await refreshAllData();
+      products = serverProducts || [];
+      sales = serverSales || [];
+      deletedSales = serverDeleted || [];
+      expenses = serverExpenses || [];
+      purchases = serverPurchases || [];
+      dedupeProducts();
+      saveToLocalStorage();
+      loadProducts();
+      loadSales();
       showNotification('Local data cleared and re-synced', 'success');
     } catch (e) {
       showNotification('Failed to clear local data', 'error');
