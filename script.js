@@ -130,7 +130,18 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
   // Supabase initialization
   const supabaseUrl = 'https://ieriphdzlbuzqqwrymwn.supabase.co';
   const supabaseKey = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImllcmlwaGR6bGJ1enFxd3J5bXduIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjIzMDU1MTgsImV4cCI6MjA3Nzg4MTUxOH0.bvbs6joSxf1u9U8SlaAYmjve-N6ArNYcNMtnG6-N_HU';
-  const supabase = window.supabase.createClient(supabaseUrl, supabaseKey);
+  function sanitize(v) {
+    return String(v || '').replace(/[`'"]/g, '').trim();
+  }
+  function getCfg(k, def) {
+    try {
+      const v = localStorage.getItem(k);
+      return v ? sanitize(v) : def;
+    } catch (_) {
+      return def;
+    }
+  }
+  let supabase = window.supabase.createClient(getCfg('supabaseUrl', supabaseUrl), getCfg('supabaseKey', supabaseKey));
   
   // Global variables
   let products = [], cart = [], sales = [], deletedSales = [], users = [], currentUser = null;
@@ -4542,6 +4553,33 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
                 await DataModule.fetchUsers();
                 loadUsers();
             })();
+        }
+        
+        const su = document.getElementById('supabase-url-input');
+        const sk = document.getElementById('supabase-key-input');
+        const sb = document.getElementById('save-supabase-settings-btn');
+        if (su) {
+            try { su.value = getCfg('supabaseUrl', supabaseUrl); } catch (_) {}
+        }
+        if (sk) {
+            try { sk.value = getCfg('supabaseKey', supabaseKey); } catch (_) {}
+        }
+        if (sb && su && sk) {
+            sb.onclick = async () => {
+                const newUrl = sanitize(su.value || '');
+                const newKey = sanitize(sk.value || '');
+                try {
+                    localStorage.setItem('supabaseUrl', newUrl);
+                    localStorage.setItem('supabaseKey', newKey);
+                } catch (_) {}
+                try {
+                    supabase = window.supabase.createClient(newUrl, newKey);
+                } catch (_) {}
+                appRealtimeChannel = null;
+                await refreshAllData();
+                setupRealtimeListeners();
+                showNotification('Supabase settings saved', 'success');
+            };
         }
     }, 500);
   }
