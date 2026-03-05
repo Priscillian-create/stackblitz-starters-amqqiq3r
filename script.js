@@ -2164,13 +2164,8 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
   
   async function syncSale(operation) {
     try {
-        let validCashierId = operation.data.cashierId || '00000000-0000-0000-0000-000000000000';
-        
-        // If it's not a valid UUID, use the fallback ID
-        if (!validCashierId.match(/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i)) {
-            validCashierId = '00000000-0000-0000-0000-000000000000';
-        }
-        
+        let candidateId = operation?.data?.cashierId || (currentUser && currentUser.id) || null;
+        let validCashierId = await ensureValidUserId(candidateId);
         operation.data.cashierId = validCashierId;
         
         // IMPORTANT: Use receiptnumber (lowercase) to match the database column
