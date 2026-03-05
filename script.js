@@ -6532,6 +6532,41 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
   const saveUserBtn = document.getElementById('save-user-btn');
   if (saveUserBtn) saveUserBtn.addEventListener('click', saveUserAdmin);
   
+  async function safeClearLocalData() {
+    try {
+      if (!isOnline) {
+        showNotification('Go online before clearing data', 'warning');
+        return;
+      }
+      try {
+        if ((syncQueue || []).some(op => !op.synced)) {
+          await processSyncQueue();
+        }
+      } catch (_) {}
+      const pending = (syncQueue || []).filter(op => !op.synced).length;
+      if (pending > 0) {
+        showNotification('Pending offline operations; cannot clear now', 'error');
+        return;
+      }
+      try { await refreshAllData(); } catch (_) {}
+      const keys = [
+        STORAGE_KEYS.PRODUCTS, STORAGE_KEYS.SALES, STORAGE_KEYS.DELETED_SALES, STORAGE_KEYS.USERS,
+        STORAGE_KEYS.SETTINGS, STORAGE_KEYS.CURRENT_USER, STORAGE_KEYS.EXPENSES, STORAGE_KEYS.PURCHASES,
+        STORAGE_KEYS.STOCK_ALERTS, STORAGE_KEYS.PROFIT_DATA, STORAGE_KEYS.PRODUCTS_SYNC_TS, STORAGE_KEYS.SALES_SYNC_TS,
+        'acknowledgedAlerts','resolvedDiscrepancies','syncQueue','ARCHIVE_ENABLED'
+      ];
+      for (let i = 0; i < keys.length; i++) {
+        try { localStorage.removeItem(keys[i]); } catch (_) {}
+      }
+      await refreshAllData();
+      showNotification('Local data cleared and re-synced', 'success');
+    } catch (e) {
+      showNotification('Failed to clear local data', 'error');
+    }
+  }
+  const safeClearBtn = document.getElementById('safe-clear-storage-btn');
+  if (safeClearBtn) safeClearBtn.addEventListener('click', safeClearLocalData);
+  
   // Initialize app
   async function init() {
     loadFromLocalStorage();
@@ -6563,6 +6598,11 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
                 localStorage.setItem(STORAGE_KEYS.CURRENT_USER, JSON.stringify(currentUser));
             }
             showApp();
+            try {
+                if (isOnline) {
+                    await refreshAllData();
+                }
+            } catch (_) {}
         } else {
             showLogin();
         }
@@ -6642,3 +6682,13 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
   window.viewProduct = viewProduct;
   window.acknowledgeAlert = acknowledgeAlert;
   window.resolveDiscrepancy = resolveDiscrepancy;
+  window.addEventListener('beforeunload', (e) => {
+    try {
+      const pending = (syncQueue || []).filter(op => !op.synced).length;
+      if (pending > 0) {
+        e.preventDefault();
+        e.returnValue = '';
+        return '';
+      }
+    } catch (_) {}
+  });
