@@ -38,7 +38,7 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
     navigator.serviceWorker.addEventListener('message', (e) => {
       const d = e && e.data;
       if (d && d.type === 'SW_ACTIVATED') {
-        try { location.reload(); } catch (_) {}
+        
       }
     });
   }
@@ -1818,6 +1818,7 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
                             throw e4;
                         }
                         data = d2;
+                        error = null;
                     }
                     
                     if (error) {
@@ -2295,6 +2296,7 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
                     throw e4;
                 }
                 data = d2;
+                error = null;
             }
             
             if (error) throw error;
