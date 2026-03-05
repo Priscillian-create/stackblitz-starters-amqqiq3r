@@ -1765,13 +1765,55 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
                             .from('sales')
                             .upsert(saleToSaveWithPM, { onConflict: 'receiptnumber' })
                             .select());
-                        if (error) throw error;
+                        if (error) {
+                            const msg = (error && error.message) || '';
+                            const isNoConflict = msg.toLowerCase().includes('on conflict') || msg.toLowerCase().includes('unique or exclusion constraint');
+                            if (isNoConflict) {
+                                let insData, insErr;
+                                try {
+                                    ({ data: insData, error: insErr } = await supabase
+                                        .from('sales')
+                                        .insert(saleToSaveWithPM)
+                                        .select());
+                                } catch (e2) {
+                                    insErr = e2;
+                                }
+                                if (insErr) throw insErr;
+                                data = insData;
+                            } else {
+                                throw error;
+                            }
+                        }
                     } catch (e) {
-                        ({ data, error } = await supabase
-                            .from('sales')
-                            .upsert(saleToSaveNoPM, { onConflict: 'receiptnumber' })
-                            .select());
-                        if (error) throw error;
+                        let d2, err2;
+                        try {
+                            ({ data: d2, error: err2 } = await supabase
+                                .from('sales')
+                                .upsert(saleToSaveNoPM, { onConflict: 'receiptnumber' })
+                                .select());
+                            if (err2) {
+                                const msg2 = (err2 && err2.message) || '';
+                                const isNoConflict2 = msg2.toLowerCase().includes('on conflict') || msg2.toLowerCase().includes('unique or exclusion constraint');
+                                if (isNoConflict2) {
+                                    let insData2, insErr2;
+                                    try {
+                                        ({ data: insData2, error: insErr2 } = await supabase
+                                            .from('sales')
+                                            .insert(saleToSaveNoPM)
+                                            .select());
+                                    } catch (e3) {
+                                        insErr2 = e3;
+                                    }
+                                    if (insErr2) throw insErr2;
+                                    d2 = insData2;
+                                } else {
+                                    throw err2;
+                                }
+                            }
+                        } catch (e4) {
+                            throw e4;
+                        }
+                        data = d2;
                     }
                     
                     if (error) {
@@ -2202,13 +2244,55 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
                     .from('sales')
                     .upsert(saleToSaveWithPM, { onConflict: 'receiptnumber' })
                     .select());
-                if (error) throw error;
+                if (error) {
+                    const msg = (error && error.message) || '';
+                    const isNoConflict = msg.toLowerCase().includes('on conflict') || msg.toLowerCase().includes('unique or exclusion constraint');
+                    if (isNoConflict) {
+                        let insData, insErr;
+                        try {
+                            ({ data: insData, error: insErr } = await supabase
+                                .from('sales')
+                                .insert(saleToSaveWithPM)
+                                .select());
+                        } catch (e2) {
+                            insErr = e2;
+                        }
+                        if (insErr) throw insErr;
+                        data = insData;
+                    } else {
+                        throw error;
+                    }
+                }
             } catch (e) {
-                ({ data, error } = await supabase
-                    .from('sales')
-                    .upsert(saleToSaveNoPM, { onConflict: 'receiptnumber' })
-                    .select());
-                if (error) throw error;
+                let d2, err2;
+                try {
+                    ({ data: d2, error: err2 } = await supabase
+                        .from('sales')
+                        .upsert(saleToSaveNoPM, { onConflict: 'receiptnumber' })
+                        .select());
+                    if (err2) {
+                        const msg2 = (err2 && err2.message) || '';
+                        const isNoConflict2 = msg2.toLowerCase().includes('on conflict') || msg2.toLowerCase().includes('unique or exclusion constraint');
+                        if (isNoConflict2) {
+                            let insData2, insErr2;
+                            try {
+                                ({ data: insData2, error: insErr2 } = await supabase
+                                    .from('sales')
+                                    .insert(saleToSaveNoPM)
+                                    .select());
+                            } catch (e3) {
+                                insErr2 = e3;
+                            }
+                            if (insErr2) throw insErr2;
+                            d2 = insData2;
+                        } else {
+                            throw err2;
+                        }
+                    }
+                } catch (e4) {
+                    throw e4;
+                }
+                data = d2;
             }
             
             if (error) throw error;
