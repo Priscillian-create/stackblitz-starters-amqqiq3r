@@ -208,20 +208,6 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
     if (document.visibilityState === 'visible' && currentPage === 'reports') {
       try { refreshReportData(); } catch (_) {}
     }
-    // Sync deleted sales whenever the app becomes visible
-    if (document.visibilityState === 'visible' && isOnline && currentUser) {
-        try {
-            DataModule.fetchDeletedSales().then(updated => {
-                if (updated && updated.length !== deletedSales.length) {
-                    deletedSales = updated;
-                    saveToLocalStorage();
-                    if (currentPage === 'deleted-sales' || currentPage === 'sales') {
-                        loadSales();
-                    }
-                }
-            }).catch(err => console.warn('Error syncing deleted sales on visibility:', err));
-        } catch (_) {}
-    }
   });
   
   // Settings - Changed from const to let to allow reassignment
@@ -556,25 +542,12 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
             if (error) throw error;
   
             try {
-                // Ensure we have auth headers for this request
-                await ensureSupabaseAuth();
-                
-                // Insert the user profile into the users table
-                const { error: insertError } = await supabase.from('users').insert({
-                    id: data.user.id, 
-                    name, 
-                    email, 
-                    role,
+                await supabase.from('users').insert({
+                    id: data.user.id, name, email, role,
                     created_at: new Date().toISOString(),
                     last_login: new Date().toISOString(),
                     created_by: user.id
                 });
-                
-                if (insertError) {
-                    console.warn('Error saving user to database:', insertError.message);
-                    // Continue anyway - user is created in auth, profile just missing some data
-                    showNotification(`User "${name}" created but profile save had issues. Please contact support if needed.`, "warning");
-                }
             } catch (dbError) {
                 console.warn('Could not save user to database:', dbError);
             }
@@ -1252,7 +1225,10 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
                             if ((typeof srv.total !== 'number' || isNaN(srv.total)) && typeof ls.total === 'number') srv.total = ls.total;
                             if (!srv.created_at && ls.created_at) srv.created_at = ls.created_at;
                         } else {
+                        const idStr = ls.id ? String(ls.id) : '';
+                        if (idStr.startsWith('temp_')) {
                             mergedSales.push(ls);
+                        }
                         }
                     });
                     serverMap.forEach(v => mergedSales.push(v));
@@ -1312,7 +1288,10 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
         
         sales.forEach(localSale => {
             if (localSale && localSale.receiptNumber && !serverSalesMap[localSale.receiptNumber]) {
-                mergedSales.push(localSale);
+                const idStr = localSale.id ? String(localSale.id) : '';
+                if (idStr.startsWith('temp_')) {
+                    mergedSales.push(localSale);
+                }
             }
         });
         
@@ -2084,21 +2063,17 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
                 }
             }
             
-            // 2. Queue the delete operation for sync
-            const deleteOp = {
-                type: 'deleteSale',
-                id: saleId,
-                receiptNumber: sale?.receiptNumber || sale?.receiptnumber
-            };
-            addToSyncQueue(deleteOp);
-            
-            // 3. If offline, return immediately with success
+            // 2. If offline, queue the delete and return immediately
             if (!isOnline) {
+                addToSyncQueue({
+                    type: 'deleteSale',
+                    id: saleId
+                });
                 return { success: true };
             }
             
-            // 4. Delete from database asynchronously (non-blocking)
-            // This triggers the realtime listener on other devices
+            // 3. Delete from database asynchronously (don't wait for it)
+            // This makes the delete operation appear instant to the user
             (async () => {
                 try {
                     // Try to delete by ID first
@@ -2116,26 +2091,23 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
                                 .delete()
                                 .eq('receiptnumber', receiptNo);
                             
-                            if (!deleteByReceiptErr) {
-                                // Mark as successfully synced
-                                const opIdx = syncQueue.findIndex(op => op.id === deleteOp.id && op.type === 'deleteSale');
-                                if (opIdx >= 0) syncQueue[opIdx].synced = true;
-                                localStorage.setItem('syncQueue', JSON.stringify(syncQueue));
-                                return;
+                            if (deleteByReceiptErr) {
+                                console.warn('Could not delete sale:', deleteByReceiptErr);
+                                // Add to sync queue for retry
+                                addToSyncQueue({
+                                    type: 'deleteSale',
+                                    id: saleId
+                                });
                             }
                         }
-                        // If both fail, keep in sync queue for retry
-                        return;
                     }
-                    
-                    // Mark as successfully synced
-                    const opIdx = syncQueue.findIndex(op => op.id === deleteOp.id && op.type === 'deleteSale');
-                    if (opIdx >= 0) syncQueue[opIdx].synced = true;
-                    localStorage.setItem('syncQueue', JSON.stringify(syncQueue));
-                    
                 } catch (dbError) {
                     console.warn('Error deleting from database:', dbError);
-                    // Will be retried by sync queue on next online event
+                    // Queue for retry
+                    addToSyncQueue({
+                        type: 'deleteSale',
+                        id: saleId
+                    });
                 }
             })();
             
@@ -3084,108 +3056,31 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
             const s = payload && payload.new ? payload.new : null;
             if (!s) return;
             if (!s.receiptNumber && s.receiptnumber) s.receiptNumber = s.receiptnumber;
-            
             const idx = sales.findIndex(x => (x.receiptNumber === s.receiptnumber) || (x.receiptNumber === s.receiptNumber));
-            
-            // Check if this sale was soft-deleted (deleted_at is set)
-            if (s.deleted_at) {
-                // Remove from sales if it was deleted
-                if (idx >= 0) {
-                    sales.splice(idx, 1);
-                }
-                // Sync deleted sales to update deleted-sales table
-                if (isOnline) {
-                    DataModule.fetchDeletedSales().then(updated => {
-                        deletedSales = updated;
-                        saveToLocalStorage();
-                        if (currentPage === 'deleted-sales') {
-                            loadDeletedSales();
-                        }
-                    }).catch(err => console.warn('Error fetching deleted sales on UPDATE:', err));
-                }
-            } else {
-                // Normal update - sale still exists
-                if (idx >= 0) {
-                    sales[idx] = { ...sales[idx], ...s };
-                } else {
-                    // Sale was not in the list, add it
-                    sales.push(s);
-                }
-            }
-            
-            saveToLocalStorage();
-            if (currentPage === 'sales') {
+            if (idx >= 0) {
+                sales[idx] = { ...sales[idx], ...s };
+                saveToLocalStorage();
                 loadSales();
             }
-        } catch (err) {
-            console.error('Error handling sales UPDATE:', err);
-        }
+        } catch (_) {}
     });
     channel.on('postgres_changes', { event: 'DELETE', schema: 'public', table: 'sales' }, (payload) => {
         try {
             const s = payload && payload.old ? payload.old : null;
             if (!s) return;
-            const saleId = s.id;
             const rn = s.receiptnumber || s.receiptNumber;
-            
-            // Remove from sales array by both ID and receipt number
-            sales = sales.filter(x => x.id !== saleId && x.receiptNumber !== rn && x.receiptnumber !== rn);
+            sales = sales.filter(x => x.receiptNumber !== rn);
             saveToLocalStorage();
-            
-            // Trigger a refresh of deleted sales since this deletion should have added to deleted_sales
-            if (isOnline) {
-                DataModule.fetchDeletedSales().then(updated => {
-                    deletedSales = updated;
-                    saveToLocalStorage();
-                    if (currentPage === 'deleted-sales') {
-                        loadDeletedSales();
-                    }
-                }).catch(err => console.warn('Error fetching deleted sales after deletion:', err));
-            }
-            
-            if (currentPage === 'sales') {
-                loadSales();
-            }
-        } catch (err) {
-            console.error('Error handling sales DELETE:', err);
-        }
+            loadSales();
+        } catch (_) {}
     });
   
-    // Enhanced listener for deleted_sales with explicit event handling
-    channel.on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'deleted_sales' }, (payload) => {
-        try {
-            const newDeleted = payload.new;
-            if (newDeleted && newDeleted.id) {
-                // Check if this is a new deletion from another device
-                const existsLocally = deletedSales.find(s => s.id === newDeleted.id);
-                if (!existsLocally) {
-                    deletedSales.push(newDeleted);
-                    // Also remove from sales if it exists there
-                    sales = sales.filter(s => s.id !== newDeleted.id && s.id !== newDeleted.original_sale_id);
-                    saveToLocalStorage();
-                    if (currentPage === 'deleted-sales' || currentPage === 'sales') {
-                        loadDeletedSales();
-                    }
-                }
-            }
-        } catch (err) {
-            console.error('Error handling deleted_sales INSERT:', err);
-        }
-    });
-    
-    channel.on('postgres_changes', { event: 'DELETE', schema: 'public', table: 'deleted_sales' }, (payload) => {
-        try {
-            const deleted = payload.old;
-            if (deleted && deleted.id) {
-                deletedSales = deletedSales.filter(s => s.id !== deleted.id);
-                saveToLocalStorage();
-                if (currentPage === 'deleted-sales') {
-                    loadDeletedSales();
-                }
-            }
-        } catch (err) {
-            console.error('Error handling deleted_sales DELETE:', err);
-        }
+    channel.on('postgres_changes', { event: '*', schema: 'public', table: 'deleted_sales' }, () => {
+        DataModule.fetchDeletedSales().then(updatedDeletedSales => {
+            deletedSales = updatedDeletedSales;
+            saveToLocalStorage();
+            loadDeletedSales();
+        });
     });
   
     channel.on('postgres_changes', { event: '*', schema: 'public', table: 'expenses' }, () => {
@@ -5441,46 +5336,30 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
         // Show immediate UI feedback
         showNotification('⏳ Deleting sale...', 'info');
         
-        // Call DataModule.deleteSale without waiting - it's non-blocking
-        DataModule.deleteSale(saleId).then(result => {
-            if (result.success) {
-                // Update UI immediately
-                sales = sales.filter(s => s.id !== saleId);
-                saveToLocalStorage();
-                
-                // Defer heavy UI updates to requestIdleCallback to avoid blocking
-                if (typeof requestIdleCallback !== 'undefined') {
-                    requestIdleCallback(() => {
-                        updateSalesTables();
-                        try {
-                            if (typeof window.updateAnalyticsSummary === 'function') {
-                                window.updateAnalyticsSummary();
-                            }
-                        } catch (_) {}
-                    });
-                } else {
-                    updateSalesTables();
-                    try {
-                        if (typeof window.updateAnalyticsSummary === 'function') {
-                            window.updateAnalyticsSummary();
-                        }
-                    } catch (_) {}
-                }
-                
-                showNotification('✅ Sale deleted! This will sync across all your devices.', 'success');
-                
-                if (currentPage === 'reports') {
-                    generateReport();
-                }
-            } else {
-                showNotification('❌ Failed to delete sale: ' + (result.error || 'Unknown error'), 'error');
+        const result = await DataModule.deleteSale(saleId);
+        
+        if (result.success) {
+            // Update UI immediately
+            sales = sales.filter(s => s.id !== saleId);
+            saveToLocalStorage();
+            updateSalesTables();
+            
+            showNotification('✅ Sale deleted! This will sync across all your devices.', 'success');
+            
+            if (currentPage === 'reports') {
+                generateReport();
             }
-        }).catch(error => {
-            console.error('Error deleting sale:', error);
-            showNotification('❌ Error deleting sale: ' + (error.message || 'Unknown error'), 'error');
-        });
+            
+            try {
+                if (typeof window.updateAnalyticsSummary === 'function') {
+                    window.updateAnalyticsSummary();
+                }
+            } catch (_) {}
+        } else {
+            showNotification('❌ Failed to delete sale: ' + (result.error || 'Unknown error'), 'error');
+        }
     } catch (error) {
-        console.error('Error initiating sale deletion:', error);
+        console.error('Error deleting sale:', error);
         showNotification('❌ Error deleting sale: ' + (error.message || 'Unknown error'), 'error');
     }
   }
@@ -7169,72 +7048,30 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
     }, 60000); // Check every minute
     
     // Sync deleted sales periodically (every 2 minutes) to reflect deletions across devices
-    // This is a fallback to the realtime listener in case of connection issues
     setInterval(async () => {
-        if (isOnline && currentUser && deletedSales.length >= 0) {
-            // Defer heavy operations to avoid blocking the UI
-            if (typeof requestIdleCallback !== 'undefined') {
-                requestIdleCallback(async () => {
-                    try {
-                        const newDeletedSales = await DataModule.fetchDeletedSales();
-                        if (!newDeletedSales) return;
-                        
-                        // Create sets for comparison (minimal processing)
-                        const newDeletedIds = new Set(newDeletedSales.map(s => (s.id || s.original_sale_id || s.receiptnumber || '').toString()));
-                        const oldDeletedIds = new Set(deletedSales.map(s => (s.id || s.original_sale_id || s.receiptnumber || '').toString()));
-                        
-                        // Check if there are any differences
-                        const hasNewDeletions = newDeletedIds.size !== oldDeletedIds.size || 
-                            newDeletedSales.some(s => !oldDeletedIds.has((s.id || s.original_sale_id || s.receiptnumber || '').toString()));
-                        
-                        if (hasNewDeletions) {
-                            // Update deletedSales
-                            deletedSales = newDeletedSales;
-                            
-                            // Remove deleted items from sales
-                            const originalSaleIds = new Set(newDeletedSales.map(s => s.original_sale_id).filter(id => id));
-                            sales = sales.filter(s => !newDeletedIds.has(s.id) && !newDeletedIds.has(s.receiptnumber) && !originalSaleIds.has(s.id));
-                            
-                            saveToLocalStorage();
-                            
-                            // Only refresh views if something actually changed and we're on the right page
-                            if (currentPage === 'sales' && typeof loadSales === 'function') {
-                                loadSales();
-                            } else if (currentPage === 'deleted-sales' && typeof loadDeletedSales === 'function') {
-                                loadDeletedSales();
-                            }
-                        }
-                    } catch (e) {
-                        console.warn('Error in 2-minute deleted sales sync:', e);
-                    }
-                });
-            } else {
-                // Fallback for browsers that don't support requestIdleCallback
-                try {
-                    const newDeletedSales = await DataModule.fetchDeletedSales();
-                    if (!newDeletedSales) return;
+        if (isOnline && currentUser) {
+            try {
+                const newDeletedSales = await DataModule.fetchDeletedSales();
+                if (newDeletedSales && newDeletedSales.length > 0) {
+                    const newDeletedIds = new Set(newDeletedSales.map(s => s.id || s.receiptnumber));
+                    const oldDeletedIds = new Set(deletedSales.map(s => s.id || s.receiptnumber));
                     
-                    const newDeletedIds = new Set(newDeletedSales.map(s => (s.id || s.original_sale_id || s.receiptnumber || '').toString()));
-                    const oldDeletedIds = new Set(deletedSales.map(s => (s.id || s.original_sale_id || s.receiptnumber || '').toString()));
-                    
-                    const hasNewDeletions = newDeletedIds.size !== oldDeletedIds.size || 
-                        newDeletedSales.some(s => !oldDeletedIds.has((s.id || s.original_sale_id || s.receiptnumber || '').toString()));
+                    // Check if there are any new deletions from other devices
+                    const hasNewDeletions = newDeletedSales.some(s => !oldDeletedIds.has(s.id || s.receiptnumber));
                     
                     if (hasNewDeletions) {
                         deletedSales = newDeletedSales;
-                        const originalSaleIds = new Set(newDeletedSales.map(s => s.original_sale_id).filter(id => id));
-                        sales = sales.filter(s => !newDeletedIds.has(s.id) && !newDeletedIds.has(s.receiptnumber) && !originalSaleIds.has(s.id));
+                        sales = sales.filter(s => !newDeletedIds.has(s.id) && !newDeletedIds.has(s.receiptnumber));
                         saveToLocalStorage();
                         
-                        if (currentPage === 'sales' && typeof loadSales === 'function') {
+                        // Refresh the current view if showing sales or deleted sales
+                        if (currentPage === 'sales' || currentPage === 'deleted-sales') {
                             loadSales();
-                        } else if (currentPage === 'deleted-sales' && typeof loadDeletedSales === 'function') {
-                            loadDeletedSales();
                         }
                     }
-                } catch (e) {
-                    console.warn('Error in 2-minute deleted sales sync:', e);
                 }
+            } catch (e) {
+                console.warn('Error syncing deleted sales:', e);
             }
         }
     }, 2 * 60 * 1000); // Check every 2 minutes
