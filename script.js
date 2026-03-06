@@ -568,7 +568,21 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
         
         try {
             const { data, error } = await supabase.auth.signInWithPassword({ email, password });
-            if (error) throw error;
+            
+            if (error) {
+                // Provide specific error messages for common login issues
+                if (error.message.includes('Invalid login credentials') || error.message.includes('invalid_credentials')) {
+                    showNotification('❌ Invalid username or password. Please try again.', 'error');
+                    console.error('Login error:', error);
+                    return { success: false, error: 'Invalid credentials' };
+                } else if (error.message.includes('Email not confirmed')) {
+                    showNotification('⚠️ Please confirm your email before logging in.', 'warning');
+                    return { success: false, error: 'Email not confirmed' };
+                } else {
+                    showNotification('❌ ' + (error.message || 'Login failed'), 'error');
+                    return { success: false, error: error.message };
+                }
+            }
             
             let savedRole = null;
             try {
@@ -620,7 +634,7 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
             
             localStorage.setItem(STORAGE_KEYS.CURRENT_USER, JSON.stringify(currentUser));
             showApp();
-            showNotification('Login successful!', 'success');
+            showNotification('✅ Login successful!', 'success');
             if (isOnline && syncQueue.length > 0) {
                 setTimeout(() => {
                     processSyncQueue();
@@ -629,7 +643,7 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
             return { success: true };
         } catch (error) {
             console.error('Signin error:', error);
-            showNotification(error.message || 'Login failed', 'error');
+            showNotification('❌ ' + (error.message || 'Login failed'), 'error');
             return { success: false, error: error.message };
         } finally {
             loginSubmitBtn.classList.remove('loading');
@@ -2027,139 +2041,78 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
     
     async deleteSale(saleId) {
         try {
+            // 1. Delete from local storage immediately for instant UI feedback
             const saleIndex = sales.findIndex(s => s.id === saleId);
+            let sale = null;
+            
             if (saleIndex >= 0) {
-                const sale = sales[saleIndex];
-                sale.deleted = true;
-                sale.deletedAt = new Date().toISOString();
-                deletedSales.push(sale);
+                sale = sales[saleIndex];
                 sales.splice(saleIndex, 1);
                 saveToLocalStorage();
+            } else {
+                // If not in sales list, try to find in deleted sales
+                sale = deletedSales.find(s => s.id === saleId);
+                if (!sale) {
+                    return { success: false, error: 'Sale not found' };
+                }
             }
             
-            if (isOnline) {
+            // 2. If offline, queue the delete and return immediately
+            if (!isOnline) {
+                addToSyncQueue({
+                    type: 'deleteSale',
+                    id: saleId
+                });
+                return { success: true };
+            }
+            
+            // 3. Delete from database asynchronously (don't wait for it)
+            // This makes the delete operation appear instant to the user
+            (async () => {
                 try {
-                    let { data: saleData, error: fetchError } = await supabase
-                        .from('sales')
-                        .select('*')
-                        .eq('id', saleId)
-                        .single();
-                    
-                    if (fetchError || !saleData) {
-                        const localSale = deletedSales.find(s => s.id === saleId) || sales.find(s => s.id === saleId);
-                        const receiptNo = localSale?.receiptnumber || localSale?.receiptNumber;
-                        if (receiptNo) {
-                            const { data: byReceipt, error: byReceiptErr } = await supabase
-                                .from('sales')
-                                .select('*')
-                                .eq('receiptnumber', receiptNo)
-                                .single();
-                            if (!byReceiptErr && byReceipt) {
-                                saleData = byReceipt;
-                            }
-                        }
-                        if (!saleData) throw fetchError || new Error('Sale not found');
-                    }
-                    
-                    if (saleData) {
-                        const archivedSale = {
-                            // CHANGED: Removed 'id: saleData.id' to let the database auto-generate a unique ID
-                            original_sale_id: saleData.id, // CHANGED: Store the original sale ID in the new column
-                            receiptnumber: saleData.receiptnumber || saleData.receiptNumber,
-                            items: saleData.items,
-                            total: saleData.total,
-                            created_at: saleData.created_at,
-                            cashier: saleData.cashier || null,
-                            cashierid: saleData.cashierid || saleData.cashierId || null,
-                            deleted: true,
-                            deleted_at: new Date().toISOString()
-                        };
-                        if (isArchiveEnabled()) {
-                            const { error: insertError } = await supabase
-                                .from('deleted_sales')
-                                .insert(archivedSale);
-                            if (insertError) {
-                                let { error: updateError } = await supabase
-                                    .from('sales')
-                                    .update({ deleted_at: archivedSale.deleted_at })
-                                    .eq('id', saleId);
-                                if (updateError) {
-                                    const { error: updateByReceiptErr } = await supabase
-                                        .from('sales')
-                                        .update({ deleted_at: archivedSale.deleted_at })
-                                        .eq('receiptnumber', archivedSale.receiptnumber);
-                                    if (updateByReceiptErr) throw updateByReceiptErr;
-                                }
-                                return { success: true };
-                            }
-                    let { error: deleteError } = await supabase
+                    // Try to delete by ID first
+                    const { error: deleteError } = await supabase
                         .from('sales')
                         .delete()
                         .eq('id', saleId);
+                    
                     if (deleteError) {
-                        const { error: deleteByReceiptErr } = await supabase
-                            .from('sales')
-                            .delete()
-                            .eq('receiptnumber', archivedSale.receiptnumber);
-                        if (deleteByReceiptErr) {
-                            let { error: updateError } = await supabase
+                        // Try to delete by receipt number if ID doesn't work
+                        const receiptNo = sale?.receiptnumber || sale?.receiptNumber;
+                        if (receiptNo) {
+                            const { error: deleteByReceiptErr } = await supabase
                                 .from('sales')
-                                .update({ deleted_at: archivedSale.deleted_at })
-                                .eq('id', saleId);
-                            if (updateError) {
-                                const { error: updateByReceiptErr } = await supabase
-                                    .from('sales')
-                                    .update({ deleted_at: archivedSale.deleted_at })
-                                    .eq('receiptnumber', archivedSale.receiptnumber);
-                                if (updateByReceiptErr) throw updateByReceiptErr;
+                                .delete()
+                                .eq('receiptnumber', receiptNo);
+                            
+                            if (deleteByReceiptErr) {
+                                console.warn('Could not delete sale:', deleteByReceiptErr);
+                                // Add to sync queue for retry
+                                addToSyncQueue({
+                                    type: 'deleteSale',
+                                    id: saleId
+                                });
                             }
                         }
-                        return { success: true };
                     }
-                    return { success: true };
-                } else {
-                    let { error: updateError } = await supabase
-                        .from('sales')
-                        .update({ deleted_at: archivedSale.deleted_at })
-                        .eq('id', saleId);
-                    if (updateError) {
-                        const { error: updateByReceiptErr } = await supabase
-                            .from('sales')
-                            .update({ deleted_at: archivedSale.deleted_at })
-                            .eq('receiptnumber', archivedSale.receiptnumber);
-                        if (updateByReceiptErr) throw updateByReceiptErr;
-                    }
-                    return { success: true };
-                }
-                    } else {
-                        return { success: false, error: 'Sale not found' };
-                    }
-                    } catch (dbError) {
-                        console.error('Database delete failed:', dbError);
-                        showNotification('Failed to delete from database. Marked as deleted locally.', 'warning');
-                        
-                        addToSyncQueue({
-                            type: 'deleteSale',
-                            id: saleId
-                        });
-                        
-                        return { success: true };
-                    }
-                } else {
+                } catch (dbError) {
+                    console.warn('Error deleting from database:', dbError);
+                    // Queue for retry
                     addToSyncQueue({
                         type: 'deleteSale',
                         id: saleId
                     });
-                    
-                    return { success: true };
                 }
-            } catch (error) {
-                console.error('Error deleting sale:', error);
-                showNotification('Error deleting sale', 'error');
-                return { success: false, error };
-            }
+            })();
+            
+            return { success: true };
+            
+        } catch (error) {
+            console.error('Error deleting sale:', error);
+            return { success: false, error: error.message };
         }
-    };
+    }
+  };
   
   // Sync Queue Management
   function addToSyncQueue(operation) {
@@ -4947,18 +4900,53 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
         const cartItem = document.createElement('div');
         cartItem.className = 'cart-item';
         
-        cartItem.innerHTML = `
-            <div class="cart-item-info">
-                <div class="cart-item-name">${item.name}</div>
-                <div class="cart-item-price">${formatCurrency(item.price)}</div>
-                <div class="cart-item-qty">
-                    <button onclick="updateQuantity('${item.id}', -1)">-</button>
-                    <input type="number" value="${item.quantity}" min="1" readonly>
-                    <button onclick="updateQuantity('${item.id}', 1)">+</button>
-                </div>
-            </div>
-            <div class="cart-item-total">${formatCurrency(itemTotal)}</div>
-        `;
+        cartItem.innerHTML = '';
+        const cartItemInfo = document.createElement('div');
+        cartItemInfo.className = 'cart-item-info';
+        
+        const nameDiv = document.createElement('div');
+        nameDiv.className = 'cart-item-name';
+        nameDiv.textContent = item.name;
+        cartItemInfo.appendChild(nameDiv);
+        
+        const priceDiv = document.createElement('div');
+        priceDiv.className = 'cart-item-price';
+        priceDiv.textContent = formatCurrency(item.price);
+        cartItemInfo.appendChild(priceDiv);
+        
+        const qtyDiv = document.createElement('div');
+        qtyDiv.className = 'cart-item-qty';
+        
+        const minusBtn = document.createElement('button');
+        minusBtn.className = 'cart-qty-btn';
+        minusBtn.textContent = '-';
+        minusBtn.setAttribute('data-product-id', item.id);
+        minusBtn.setAttribute('data-change', '-1');
+        minusBtn.setAttribute('aria-label', `Decrease quantity for ${item.name}`);
+        qtyDiv.appendChild(minusBtn);
+        
+        const qtyInput = document.createElement('input');
+        qtyInput.type = 'number';
+        qtyInput.value = item.quantity;
+        qtyInput.min = '1';
+        qtyInput.readOnly = true;
+        qtyDiv.appendChild(qtyInput);
+        
+        const plusBtn = document.createElement('button');
+        plusBtn.className = 'cart-qty-btn';
+        plusBtn.textContent = '+';
+        plusBtn.setAttribute('data-product-id', item.id);
+        plusBtn.setAttribute('data-change', '1');
+        plusBtn.setAttribute('aria-label', `Increase quantity for ${item.name}`);
+        qtyDiv.appendChild(plusBtn);
+        
+        cartItemInfo.appendChild(qtyDiv);
+        cartItem.appendChild(cartItemInfo);
+        
+        const totalDiv = document.createElement('div');
+        totalDiv.className = 'cart-item-total';
+        totalDiv.textContent = formatCurrency(itemTotal);
+        cartItem.appendChild(totalDiv);
         
         cartItems.appendChild(cartItem);
     });
@@ -5318,13 +5306,13 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
   
   async function deleteSale(saleId) {
     if (!AuthModule.isAdmin()) {
-        showNotification('You do not have permission to delete sales', 'error');
+        showNotification('❌ You do not have permission to delete sales', 'error');
         return;
     }
     
     const sale = sales.find(s => s.id === saleId);
     if (!sale) {
-        showNotification('Sale not found', 'error');
+        showNotification('❌ Sale not found', 'error');
         return;
     }
     
@@ -5332,20 +5320,25 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
         `Receipt #: ${sale.receiptNumber}\n` +
         `Date: ${formatDate(sale.created_at)}\n` +
         `Total: ${formatCurrency(sale.total)}\n\n` +
-        `This action cannot be undone.`;
+        `This will be synced across all devices.`;
     
     if (!confirm(confirmMessage)) {
         return;
     }
     
     try {
+        // Show immediate UI feedback
+        showNotification('⏳ Deleting sale...', 'info');
+        
         const result = await DataModule.deleteSale(saleId);
         
         if (result.success) {
-            showNotification('Sale deleted successfully', 'success');
-            
-            sales = await DataModule.fetchSales();
+            // Update UI immediately
+            sales = sales.filter(s => s.id !== saleId);
+            saveToLocalStorage();
             updateSalesTables();
+            
+            showNotification('✅ Sale deleted! This will sync across all your devices.', 'success');
             
             if (currentPage === 'reports') {
                 generateReport();
@@ -5357,11 +5350,11 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
                 }
             } catch (_) {}
         } else {
-            showNotification('Failed to delete sale', 'error');
+            showNotification('❌ Failed to delete sale: ' + (result.error || 'Unknown error'), 'error');
         }
     } catch (error) {
         console.error('Error deleting sale:', error);
-        showNotification('Error deleting sale', 'error');
+        showNotification('❌ Error deleting sale: ' + (error.message || 'Unknown error'), 'error');
     }
   }
   
@@ -6255,6 +6248,18 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
     });
   }
   
+  // Cart quantity button delegation (for performance)
+  if (cartItems) {
+    cartItems.addEventListener('click', (e) => {
+        const btn = e.target.closest('.cart-qty-btn');
+        if (btn) {
+            const productId = btn.getAttribute('data-product-id');
+            const change = parseInt(btn.getAttribute('data-change'), 10);
+            updateQuantity(productId, change);
+        }
+    });
+  }
+  
   // Product search
   function applyProductSearch(searchTerm) {
     const term = (searchTerm || '').toLowerCase();
@@ -6754,7 +6759,14 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
                 email,
                 password: currentPassword
             });
-            if (signErr) throw signErr;
+            if (signErr) {
+                if (signErr.message.includes('Invalid login credentials') || signErr.message.includes('invalid_credentials')) {
+                    showNotification('❌ Current password is incorrect. Please try again.', 'error');
+                } else {
+                    showNotification('❌ Authentication failed: ' + signErr.message, 'error');
+                }
+                return;
+            }
             
             const { error: updateError } = await supabase.auth.updateUser({
                 password: newPassword
@@ -6765,14 +6777,14 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
                 await supabase.auth.refreshSession();
             } catch (_) {}
             
-            showNotification('Password changed successfully', 'success');
+            showNotification('✅ Password changed successfully!', 'success');
             changePasswordForm.reset();
         } catch (error) {
             const msg = (error && error.message) || 'Failed to change password';
             if (msg.toLowerCase().includes('invalid login') || msg.toLowerCase().includes('invalid credentials')) {
-                showNotification('Current password is incorrect', 'error');
+                showNotification('❌ Current password is incorrect. Please try again.', 'error');
             } else {
-                showNotification('Failed to change password: ' + msg, 'error');
+                showNotification('❌ Failed to change password: ' + msg, 'error');
             }
         } finally {
             changePasswordBtn.classList.remove('loading');
@@ -7028,6 +7040,35 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
             loadStockAlerts();
         }
     }, 60000); // Check every minute
+    
+    // Sync deleted sales periodically (every 2 minutes) to reflect deletions across devices
+    setInterval(async () => {
+        if (isOnline && currentUser) {
+            try {
+                const newDeletedSales = await DataModule.fetchDeletedSales();
+                if (newDeletedSales && newDeletedSales.length > 0) {
+                    const newDeletedIds = new Set(newDeletedSales.map(s => s.id || s.receiptnumber));
+                    const oldDeletedIds = new Set(deletedSales.map(s => s.id || s.receiptnumber));
+                    
+                    // Check if there are any new deletions from other devices
+                    const hasNewDeletions = newDeletedSales.some(s => !oldDeletedIds.has(s.id || s.receiptnumber));
+                    
+                    if (hasNewDeletions) {
+                        deletedSales = newDeletedSales;
+                        sales = sales.filter(s => !newDeletedIds.has(s.id) && !newDeletedIds.has(s.receiptnumber));
+                        saveToLocalStorage();
+                        
+                        // Refresh the current view if showing sales or deleted sales
+                        if (currentPage === 'sales' || currentPage === 'deleted-sales') {
+                            loadSales();
+                        }
+                    }
+                }
+            } catch (e) {
+                console.warn('Error syncing deleted sales:', e);
+            }
+        }
+    }, 2 * 60 * 1000); // Check every 2 minutes
     
     // Refresh session every 30 minutes
     setInterval(async () => {
