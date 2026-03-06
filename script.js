@@ -828,14 +828,26 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
                             .from('products')
                             .select('id,name,category,price,stock,expirydate,barcode,deleted,updated_at')
                             .range(offset, offset + limit - 1));
-                        if (error) throw error;
+                        if (error) {
+                            const msg = (error.message || '').toLowerCase();
+                            if (msg.includes('no api key found')) {
+                                break;
+                            }
+                            throw error;
+                        }
                     } catch (e) {
                         withUpdatedAt = false;
                         ({ data, error } = await supabase
                             .from('products')
                             .select('id,name,category,price,stock,expirydate,barcode,deleted')
                             .range(offset, offset + limit - 1));
-                        if (error) throw error;
+                        if (error) {
+                            const msg = (error.message || '').toLowerCase();
+                            if (msg.includes('no api key found')) {
+                                break;
+                            }
+                            throw error;
+                        }
                     }
                     const batch = (data || []).map(p => {
                         if (p.expirydate && !p.expiryDate) p.expiryDate = p.expirydate;
@@ -907,7 +919,14 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
                         .gt('updated_at', sinceTs || '1970-01-01T00:00:00.000Z')
                         .order('updated_at', { ascending: true })
                         .range(page * limit, page * limit + limit - 1));
-                    if (error) throw error;
+                    if (error) {
+                        const msg = (error.message || '').toLowerCase();
+                        if (msg.includes('no api key found')) {
+                            usedUpdatedAt = false;
+                            break;
+                        }
+                        throw error;
+                    }
                 } catch (e) {
                     usedUpdatedAt = false;
                     break;
@@ -4783,11 +4802,9 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
     completeSaleBtn.disabled = true;
     
     try {
-        let validCashierId = currentUser?.id || '00000000-0000-0000-0000-000000000000';
-        
-        // If it's not a valid UUID, use the fallback ID
-        if (!validCashierId.match(/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i)) {
-            validCashierId = '00000000-0000-0000-0000-000000000000';
+        let validCashierId = currentUser?.id || null;
+        if (validCashierId && !validCashierId.match(/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i)) {
+            validCashierId = null;
         }
         
         const pmEl = document.getElementById('payment-method');
@@ -4803,10 +4820,12 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
             cashierId: validCashierId,
             paymentMethod: paymentMethod
         };
+        const localResult = DataModule.saveSaleLocally(sale);
+        (async () => {
+            try { await DataModule.saveSale(sale); } catch (_) {}
+        })();
         
-        const result = await DataModule.saveSale(sale);
-        
-        if (result.success) {
+        if (localResult.success) {
             for (const cartItem of cart) {
                 const product = products.find(p => p.id === cartItem.id);
                 if (product) {
@@ -4835,7 +4854,7 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
                 loadStockCheck();
             } catch (_) {}
             
-            showReceipt(result.sale);
+            showReceipt(localResult.sale);
             
             cart = [];
             updateCart();
