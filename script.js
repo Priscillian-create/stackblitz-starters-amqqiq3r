@@ -142,6 +142,17 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
     }
   }
   let supabase = window.supabase.createClient(getCfg('supabaseUrl', supabaseUrl), getCfg('supabaseKey', supabaseKey));
+  async function getAuthHeaders() {
+    try {
+      const { data: { session } } = await supabase.auth.getSession();
+      const key = getCfg('supabaseKey', supabaseKey);
+      const token = session && session.access_token ? session.access_token : key;
+      return { apikey: key, Authorization: `Bearer ${token}` };
+    } catch (_) {
+      const key = getCfg('supabaseKey', supabaseKey);
+      return { apikey: key, Authorization: `Bearer ${key}` };
+    }
+  }
   
   // Global variables
   let products = [], cart = [], sales = [], deletedSales = [], users = [], currentUser = null;
@@ -724,14 +735,13 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
             if (acc.length === 0 && missingApiKey) {
                 try {
                     const base = getCfg('supabaseUrl', supabaseUrl);
-                    const key = getCfg('supabaseKey', supabaseKey);
                     let offset = 0;
                     const fallbackLimit = PRODUCTS_PAGE_SIZE;
                     while (true) {
                         const url = `${base}/rest/v1/sales?select=*&created_at=gte.${encodeURIComponent(startIso)}&created_at=lte.${encodeURIComponent(endIso)}&order=created_at.desc&offset=${offset}&limit=${fallbackLimit}`;
                         const res = await fetch(url, {
                             method: 'GET',
-                            headers: { apikey: key, Authorization: `Bearer ${key}` }
+                            headers: await getAuthHeaders()
                         });
                         if (!res.ok) break;
                         const rows = await res.json();
@@ -1118,14 +1128,13 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
                 if (allSales.length === 0 && missingApiKey) {
                     try {
                         const base = getCfg('supabaseUrl', supabaseUrl);
-                        const key = getCfg('supabaseKey', supabaseKey);
                         offset = 0;
                         const fallbackLimit = PRODUCTS_PAGE_SIZE;
                         while (true) {
                             const url = `${base}/rest/v1/sales?select=*&order=created_at.desc&offset=${offset}&limit=${fallbackLimit}`;
                             const res = await fetch(url, {
                                 method: 'GET',
-                                headers: { apikey: key, Authorization: `Bearer ${key}` }
+                                headers: await getAuthHeaders()
                             });
                             if (!res.ok) break;
                             const rows = await res.json();
