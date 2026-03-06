@@ -1824,13 +1824,25 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
     
     async saveSale(sale) {
         try {
-            const existingSale = sales.find(s => s.receiptNumber === sale.receiptNumber);
-            if (existingSale) {
+            const existingIndex = sales.findIndex(s => s.receiptNumber === sale.receiptNumber);
+            const existingSale = existingIndex >= 0 ? sales[existingIndex] : null;
+            const existingSaleId = existingSale && existingSale.id ? String(existingSale.id) : '';
+            const isLocalOnlySale = !!existingSale && (!existingSaleId || existingSaleId.startsWith('temp_'));
+
+            if (existingSale && !isLocalOnlySale) {
                 return { success: true, sale: existingSale };
             }
-  
-            // Always save locally first
-            const localResult = this.saveSaleLocally(sale);
+
+            if (existingSale && isLocalOnlySale) {
+                sales[existingIndex] = { ...existingSale, ...sale, id: existingSale.id };
+                sale = sales[existingIndex];
+                saveToLocalStorage();
+            }
+
+            // Always save locally first when this receipt is not already cached locally
+            const localResult = existingSale && isLocalOnlySale
+                ? { success: true, sale }
+                : this.saveSaleLocally(sale);
   
             if (supabase && typeof supabase.from === 'function') {
                 try {
@@ -1971,6 +1983,10 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
     },
     
     saveSaleLocally(sale) {
+        const existingSale = sales.find(s => s.receiptNumber === sale.receiptNumber);
+        if (existingSale) {
+            return { success: true, sale: existingSale };
+        }
         sale.id = 'temp_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
         sales.push(sale);
         saveToLocalStorage();
@@ -2903,6 +2919,36 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
   function cleanupSyncQueue() {
     syncQueue = syncQueue.filter(op => !op.synced);
     localStorage.setItem('syncQueue', JSON.stringify(syncQueue));
+  }
+
+  function recoverUnsyncedLocalSales() {
+    try {
+        const queuedReceipts = new Set(
+            (syncQueue || [])
+                .filter(op => op && op.type === 'saveSale' && op.data && op.data.receiptNumber)
+                .map(op => op.data.receiptNumber)
+        );
+        let added = 0;
+        (sales || []).forEach(sale => {
+            const saleId = sale && sale.id ? String(sale.id) : '';
+            if (!sale || !sale.receiptNumber || sale.deleted || sale.deleted_at || sale.deletedAt) return;
+            if (!saleId || !saleId.startsWith('temp_')) return;
+            if (queuedReceipts.has(sale.receiptNumber)) return;
+            syncQueue.push({
+                id: 'op_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9),
+                type: 'saveSale',
+                data: sale,
+                timestamp: new Date().toISOString()
+            });
+            queuedReceipts.add(sale.receiptNumber);
+            added++;
+        });
+        if (added > 0) {
+            localStorage.setItem('syncQueue', JSON.stringify(syncQueue));
+        }
+    } catch (e) {
+        console.error('Error recovering unsynced local sales:', e);
+    }
   }
   
   function cleanupDuplicateSales() {
@@ -6868,6 +6914,7 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
     cleanupDuplicateSales();
     validateSalesData();
     cleanupSyncQueue();
+    recoverUnsyncedLocalSales();
     
     // Check for stock alerts on initialization
     checkAndGenerateAlerts();
