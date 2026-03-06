@@ -160,6 +160,24 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
   let reportsAutoTimer = null;
   // Removed pagination view mode to keep inventory consistent
   
+  window.addEventListener('online', async () => {
+    isOnline = true;
+    appRealtimeChannel = null;
+    try { await refreshAllData(); } catch (_) {}
+    try { setupRealtimeListeners(); } catch (_) {}
+    if (currentPage === 'reports') {
+      try { refreshReportData(); } catch (_) {}
+    }
+  });
+  window.addEventListener('offline', () => {
+    isOnline = false;
+  });
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible' && currentPage === 'reports') {
+      try { refreshReportData(); } catch (_) {}
+    }
+  });
+  
   // Settings - Changed from const to let to allow reassignment
   let settings = {
     storeName: "Pa Gerrys Mart",
@@ -2908,7 +2926,7 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
   
     const channel = supabase.channel('app-changes');
   
-    channel.on('postgres_changes', { event: 'INSERT', schema: 'public', table: ' sporoducts' }, (payload) => {});
+    channel.on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'products' }, (payload) => {});
     channel.on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'products' }, (payload) => {
         try {
             const p = payload && payload.new ? payload.new : null;
@@ -4679,6 +4697,10 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
             sb.onclick = async () => {
                 const newUrl = sanitize(su.value || '');
                 const newKey = sanitize(sk.value || '');
+                if (!newUrl || !newKey || !newUrl.includes('supabase.co')) {
+                    showNotification('Enter a valid Supabase URL and anon key', 'error');
+                    return;
+                }
                 try {
                     localStorage.setItem('supabaseUrl', newUrl);
                     localStorage.setItem('supabaseKey', newKey);
