@@ -157,6 +157,7 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
   let expenses = [], purchases = [], stockAlerts = [], profitData = [];
   let expenseCategories = ['Rent', 'Utilities', 'Salaries', 'Supplies', 'Marketing', 'Maintenance', 'Other'];
   let appRealtimeChannel = null;
+  let reportsAutoTimer = null;
   // Removed pagination view mode to keep inventory consistent
   
   // Settings - Changed from const to let to allow reassignment
@@ -679,19 +680,49 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
             const limit = PRODUCTS_PAGE_SIZE;
             let page = 0;
             const acc = [];
+            let missingApiKey = false;
             while (true) {
-                const { data, error } = await supabase
+                let data, error;
+                ({ data, error } = await supabase
                     .from('sales')
                     .select('*')
                     .gte('created_at', startIso)
                     .lte('created_at', endIso)
                     .order('created_at', { ascending: false })
-                    .range(page * limit, page * limit + limit - 1);
-                if (error) break;
+                    .range(page * limit, page * limit + limit - 1));
+                if (error) {
+                    const msg = (error.message || '').toLowerCase();
+                    if (msg.includes('no api key found')) {
+                        missingApiKey = true;
+                        break;
+                    }
+                    break;
+                }
                 if (!data || data.length === 0) break;
                 acc.push(...data);
                 if (data.length < limit) break;
                 page++;
+            }
+            if (acc.length === 0 && missingApiKey) {
+                try {
+                    const base = getCfg('supabaseUrl', supabaseUrl);
+                    const key = getCfg('supabaseKey', supabaseKey);
+                    let offset = 0;
+                    const fallbackLimit = PRODUCTS_PAGE_SIZE;
+                    while (true) {
+                        const url = `${base}/rest/v1/sales?select=*&created_at=gte.${encodeURIComponent(startIso)}&created_at=lte.${encodeURIComponent(endIso)}&order=created_at.desc&offset=${offset}&limit=${fallbackLimit}`;
+                        const res = await fetch(url, {
+                            method: 'GET',
+                            headers: { apikey: key, Authorization: `Bearer ${key}` }
+                        });
+                        if (!res.ok) break;
+                        const rows = await res.json();
+                        if (!Array.isArray(rows) || rows.length === 0) break;
+                        acc.push(...rows);
+                        if (rows.length < fallbackLimit) break;
+                        offset += rows.length;
+                    }
+                } catch (_) {}
             }
             if (acc.length) {
                 const normalized = acc.map(sale => {
@@ -1020,6 +1051,7 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
                 let offset = 0;
                 const limit = PRODUCTS_PAGE_SIZE;
                 let done = false;
+                let missingApiKey = false;
 
                 while (!done) {
                     const fetchPromise = supabase
@@ -1041,6 +1073,11 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
                         throw e;
                     }
                     if (error) {
+                        const msg = (error.message || '').toLowerCase();
+                        if (msg.includes('no api key found')) {
+                            missingApiKey = true;
+                            break;
+                        }
                         if (error.code === '42P17' || (error.message || '').includes('infinite recursion')) {
                             showNotification('Database policy issue for sales. Using local cache.', 'warning');
                         } else if (error.code === '42501' || (error.message || '').includes('policy')) {
@@ -1059,6 +1096,27 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
                     } else {
                         done = true;
                     }
+                }
+                if (allSales.length === 0 && missingApiKey) {
+                    try {
+                        const base = getCfg('supabaseUrl', supabaseUrl);
+                        const key = getCfg('supabaseKey', supabaseKey);
+                        offset = 0;
+                        const fallbackLimit = PRODUCTS_PAGE_SIZE;
+                        while (true) {
+                            const url = `${base}/rest/v1/sales?select=*&order=created_at.desc&offset=${offset}&limit=${fallbackLimit}`;
+                            const res = await fetch(url, {
+                                method: 'GET',
+                                headers: { apikey: key, Authorization: `Bearer ${key}` }
+                            });
+                            if (!res.ok) break;
+                            const rows = await res.json();
+                            if (!Array.isArray(rows) || rows.length === 0) break;
+                            allSales.push(...rows);
+                            if (rows.length < fallbackLimit) break;
+                            offset += rows.length;
+                        }
+                    } catch (_) {}
                 }
 
                 if (allSales.length) {
@@ -3649,10 +3707,20 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
     pageTitle.textContent = titles[pageName] || 'Pa Gerrys Mart';
     currentPage = pageName;
     
+    if (reportsAutoTimer) {
+        try { clearInterval(reportsAutoTimer); } catch (_) {}
+        reportsAutoTimer = null;
+    }
+    
     if (pageName === 'inventory') {
         loadInventory();
     } else if (pageName === 'reports') {
         loadReports();
+        try {
+            reportsAutoTimer = setInterval(() => {
+                try { refreshReportData(); } catch (_) {}
+            }, 15000);
+        } catch (_) {}
     } else if (pageName === 'stock') {
         loadStockCheck();
     } else if (pageName === 'account') {
