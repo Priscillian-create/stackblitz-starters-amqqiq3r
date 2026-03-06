@@ -688,35 +688,11 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
                     .lte('created_at', endIso)
                     .order('created_at', { ascending: false })
                     .range(page * limit, page * limit + limit - 1);
-                if (error) {
-                    const msg = (error.message || '').toLowerCase();
-                    if (msg.includes('no api key found')) {
-                        break;
-                    }
-                    break;
-                }
+                if (error) break;
                 if (!data || data.length === 0) break;
                 acc.push(...data);
                 if (data.length < limit) break;
                 page++;
-            }
-            if (acc.length === 0) {
-                try {
-                    const base = getCfg('supabaseUrl', supabaseUrl);
-                    const key = getCfg('supabaseKey', supabaseKey);
-                    let offset = 0;
-                    const fallbackLimit = 100;
-                    while (true) {
-                        const url = `${base}/rest/v1/sales?select=*&created_at=gte.${encodeURIComponent(startIso)}&created_at=lte.${encodeURIComponent(endIso)}&order=created_at.desc&offset=${offset}&limit=${fallbackLimit}&apikey=${encodeURIComponent(key)}`;
-                        const res = await fetch(url, { method: 'GET' });
-                        if (!res.ok) break;
-                        const rows = await res.json();
-                        if (!Array.isArray(rows) || rows.length === 0) break;
-                        acc.push(...rows);
-                        if (rows.length < fallbackLimit) break;
-                        offset += rows.length;
-                    }
-                } catch (_) {}
             }
             if (acc.length) {
                 const normalized = acc.map(sale => {
