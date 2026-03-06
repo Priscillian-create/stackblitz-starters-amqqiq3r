@@ -142,17 +142,38 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
     }
   }
   let supabase = window.supabase.createClient(getCfg('supabaseUrl', supabaseUrl), getCfg('supabaseKey', supabaseKey));
+  // Get auth headers for Supabase requests
   async function getAuthHeaders() {
     try {
       const { data: { session } } = await supabase.auth.getSession();
       const key = getCfg('supabaseKey', supabaseKey);
       const token = session && session.access_token ? session.access_token : key;
-      return { apikey: key, Authorization: `Bearer ${token}` };
+      return { 
+        'apikey': key, 
+        'Authorization': `Bearer ${token}`,
+        'Content-Type': 'application/json'
+      };
     } catch (_) {
       const key = getCfg('supabaseKey', supabaseKey);
-      return { apikey: key, Authorization: `Bearer ${key}` };
+      return { 
+        'apikey': key, 
+        'Authorization': `Bearer ${key}`,
+        'Content-Type': 'application/json'
+      };
     }
   }
+  
+  // Enhanced Supabase client with proper auth headers
+  const ensureSupabaseAuth = async () => {
+    try {
+      const { data: { session } } = await supabase.auth.getSession();
+      if (session && session.access_token) {
+        // Supabase client will use the session if authenticated
+        return true;
+      }
+    } catch (_) {}
+    return false;
+  };
   
   // Global variables
   let products = [], cart = [], sales = [], deletedSales = [], users = [], currentUser = null;
@@ -414,6 +435,14 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
                 setTimeout(checkSupabaseConnection, 2000);
                 return;
             }
+            
+            const isAuthIssue = msg.includes('401') || msg.includes('unauthorized') || msg.includes('permission');
+            if (isAuthIssue) {
+                updateConnectionStatus('warning', 'Auth issue - some features limited');
+                console.warn('Authentication issue detected:', error);
+                return;
+            }
+            
             updateConnectionStatus('offline', 'Connection failed');
             
             if (error.code === '42P17' || error.message.includes('infinite recursion')) {
@@ -968,26 +997,21 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
             const limit = PRODUCTS_PAGE_SIZE;
             let page = 0;
             const updates = [];
-            let usedUpdatedAt = true;
+            let attemptedWithFilter = false;
+            
+            // First, try fetching without the timestamp filter to avoid 400 errors
             while (true) {
                 let data, error;
                 try {
                     ({ data, error } = await supabase
                         .from('products')
                         .select('id,name,category,price,stock,expirydate,barcode,deleted,updated_at')
-                        .gt('updated_at', sinceTs || '1970-01-01T00:00:00.000Z')
-                        .order('updated_at', { ascending: true })
                         .range(page * limit, page * limit + limit - 1));
                     if (error) {
-                        const msg = (error.message || '').toLowerCase();
-                        if (msg.includes('no api key found')) {
-                            usedUpdatedAt = false;
-                            break;
-                        }
                         throw error;
                     }
                 } catch (e) {
-                    usedUpdatedAt = false;
+                    console.warn('Error fetching products page:', e);
                     break;
                 }
                 if (!data || data.length === 0) break;
@@ -995,14 +1019,17 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
                     if (p.expirydate && !p.expiryDate) p.expiryDate = p.expirydate;
                     return p;
                 });
-                updates.push(...batch);
+                // Filter locally for products updated since the timestamp
+                const sinceTime = new Date(sinceTs || '1970-01-01T00:00:00.000Z').getTime();
+                const filtered = batch.filter(p => {
+                    const updatedTime = p.updated_at ? new Date(p.updated_at).getTime() : 0;
+                    return updatedTime >= sinceTime;
+                });
+                updates.push(...filtered);
                 if (data.length < limit) break;
                 page++;
             }
-            if (!usedUpdatedAt) {
-                await DataModule.fetchAllProducts();
-                return products;
-            }
+            
             if (updates.length === 0) {
                 if (products.length === 0) await DataModule.fetchAllProducts();
                 return products;
@@ -1857,6 +1884,7 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
                         paymentmethod: sale.paymentMethod
                     };
                     if (validCashierId) saleToSaveWithPM.cashierid = validCashierId;
+                    
                     const saleToSaveNoPM = {
                         receiptnumber: sale.receiptNumber,
                         items: sale.items,
@@ -1865,20 +1893,30 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
                         cashier: sale.cashier
                     };
                     if (validCashierId) saleToSaveNoPM.cashierid = validCashierId;
-                    const { data: exist, error: existErr } = await supabase
-                        .from('sales')
-                        .select('id')
-                        .eq('receiptnumber', sale.receiptNumber)
-                        .limit(1);
-                    if (!existErr && Array.isArray(exist) && exist.length > 0) {
+                    
+                    // Check if sale already exists
+                    let existsCheck, existsError;
+                    try {
+                        ({ data: existsCheck, error: existsError } = await supabase
+                            .from('sales')
+                            .select('id')
+                            .eq('receiptnumber', sale.receiptNumber)
+                            .limit(1));
+                    } catch (e) {
+                        console.warn('Error checking if sale exists:', e);
+                    }
+                    
+                    if (!existsError && Array.isArray(existsCheck) && existsCheck.length > 0) {
                         const index = sales.findIndex(s => s.receiptNumber === sale.receiptNumber);
                         if (index >= 0) {
-                            sales[index].id = exist[0].id;
+                            sales[index].id = existsCheck[0].id;
                             if (validCashierId) sales[index].cashierId = validCashierId;
                             saveToLocalStorage();
                         }
-                        return { success: true, sale: { ...sale, id: exist[0].id, ...(validCashierId ? { cashierId: validCashierId } : {}) } };
+                        return { success: true, sale: { ...sale, id: existsCheck[0].id, ...(validCashierId ? { cashierId: validCashierId } : {}) } };
                     }
+                    
+                    // Try to upsert with payment method
                     let data, error;
                     try {
                         ({ data, error } = await supabase
@@ -1886,77 +1924,71 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
                             .upsert(saleToSaveWithPM, { onConflict: 'receiptnumber' })
                             .select());
                         if (error) {
-                            const msg = (error && error.message) || '';
-                            const isNoConflict = msg.toLowerCase().includes('on conflict') || msg.toLowerCase().includes('unique or exclusion constraint');
-                            if (isNoConflict) {
-                                let insData, insErr;
-                                try {
-                                    ({ data: insData, error: insErr } = await supabase
-                                        .from('sales')
-                                        .insert(saleToSaveWithPM)
-                                        .select());
-                                } catch (e2) {
-                                    insErr = e2;
-                                }
-                                if (insErr) throw insErr;
-                                data = insData;
-                            } else {
-                                throw error;
-                            }
+                            throw error;
                         }
                     } catch (e) {
-                        let d2, err2;
+                        // Fall back to insert without payment method if upsert fails
                         try {
-                            ({ data: d2, error: err2 } = await supabase
+                            ({ data, error } = await supabase
                                 .from('sales')
-                                .upsert(saleToSaveNoPM, { onConflict: 'receiptnumber' })
+                                .insert(saleToSaveNoPM)
                                 .select());
-                            if (err2) {
-                                const msg2 = (err2 && err2.message) || '';
-                                const isNoConflict2 = msg2.toLowerCase().includes('on conflict') || msg2.toLowerCase().includes('unique or exclusion constraint');
-                                if (isNoConflict2) {
-                                    let insData2, insErr2;
-                                    try {
-                                        ({ data: insData2, error: insErr2 } = await supabase
-                                            .from('sales')
-                                            .insert(saleToSaveNoPM)
-                                            .select());
-                                    } catch (e3) {
-                                        insErr2 = e3;
-                                    }
-                                    if (insErr2) throw insErr2;
-                                    d2 = insData2;
-                                } else {
-                                    throw err2;
-                                }
+                            if (error) {
+                                throw error;
                             }
-                        } catch (e4) {
-                            throw e4;
+                        } catch (e2) {
+                            // Last resort: try using fetch with proper auth headers
+                            const headers = await getAuthHeaders();
+                            const url = `${getCfg('supabaseUrl', supabaseUrl)}/rest/v1/sales`;
+                            try {
+                                const res = await fetch(url, {
+                                    method: 'POST',
+                                    headers: headers,
+                                    body: JSON.stringify(saleToSaveNoPM)
+                                });
+                                if (res.ok) {
+                                    data = await res.json();
+                                    if (Array.isArray(data)) {
+                                        data = data;
+                                    } else {
+                                        data = [data];
+                                    }
+                                } else {
+                                    const errText = await res.text();
+                                    console.error('Fetch POST error:', res.status, errText);
+                                    throw new Error(`HTTP ${res.status}: ${errText}`);
+                                }
+                            } catch (fetchErr) {
+                                console.error('Fetch POST failed:', fetchErr);
+                                throw e2; // Throw the original error
+                            }
                         }
-                        data = d2;
-                        error = null;
                     }
                     
-                    if (error) {
-                        console.error('Supabase error:', error);
-                        throw error;
-                    }
-                    
-                    if (data && data.length > 0) {
-                        // Update the local sale with the Supabase ID
+                    if (data && (Array.isArray(data) ? data.length > 0 : data.id)) {
+                        const savedData = Array.isArray(data) ? data[0] : data;
                         const index = sales.findIndex(s => s.receiptNumber === sale.receiptNumber);
                         if (index >= 0) {
-                            sales[index].id = data[0].id;
+                            sales[index].id = savedData.id;
                             if (validCashierId) sales[index].cashierId = validCashierId;
                             saveToLocalStorage();
                         }
-                        return { success: true, sale: { ...sale, id: data[0].id, ...(validCashierId ? { cashierId: validCashierId } : {}) } };
+                        return { success: true, sale: { ...sale, id: savedData.id, ...(validCashierId ? { cashierId: validCashierId } : {}) } };
                     } else {
                         throw new Error('No data returned from insert operation');
                     }
                 } catch (dbError) {
+                    const errMsg = (dbError && (dbError.message || dbError.toString())) || 'Unknown error';
+                    const isAuthError = errMsg.includes('401') || errMsg.includes('Unauthorized') || errMsg.includes('permission') || errMsg.includes('policy');
+                    const isRLSError = errMsg.includes('42501') || errMsg.includes('row-level security');
+                    
                     console.error('Database operation failed:', dbError);
-                    showNotification('Database error: ' + dbError.message + '. Sale saved locally and will sync when connection is restored.', 'warning');
+                    
+                    if (isAuthError || isRLSError) {
+                        showNotification('Authorization issue with database. Sale saved locally. Please ensure you are properly logged in.', 'warning');
+                    } else {
+                        showNotification('Database error: ' + errMsg + '. Sale saved locally and will sync when connection is restored.', 'warning');
+                    }
                     
                     // Add to sync queue to try again later
                     addToSyncQueue({
@@ -1977,7 +2009,7 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
             }
         } catch (error) {
             console.error('Error saving sale:', error);
-            showNotification('Error saving sale', 'error');
+            showNotification('Error saving sale: ' + (error.message || 'Unknown error'), 'error');
             return { success: false, error };
         }
     },
@@ -2340,6 +2372,29 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
             .select('*')
             .eq('receiptnumber', operation.data.receiptNumber);
         
+        if (fetchError && (fetchError.message || '').includes('401')) {
+            // Auth error - try fallback fetch
+            try {
+                const headers = await getAuthHeaders();
+                const url = `${getCfg('supabaseUrl', supabaseUrl)}/rest/v1/sales?receiptnumber=eq.${encodeURIComponent(operation.data.receiptNumber)}`;
+                const res = await fetch(url, { method: 'GET', headers });
+                if (res.ok) {
+                    const data = await res.json();
+                    if (Array.isArray(data) && data.length > 0) {
+                        const localSaleIndex = sales.findIndex(s => s.receiptNumber === operation.data.receiptNumber);
+                        if (localSaleIndex !== -1) {
+                            sales[localSaleIndex].id = data[0].id;
+                            sales[localSaleIndex].cashierId = validCashierId;
+                            saveToLocalStorage();
+                        }
+                        return true;
+                    }
+                }
+            } catch (e) {
+                console.warn('Fallback fetch failed:', e);
+            }
+        }
+        
         if (fetchError) throw fetchError;
         
         if (!existingSales || existingSales.length === 0) {
@@ -2387,44 +2442,45 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
                     }
                 }
             } catch (e) {
-                let d2, err2;
+                // Try without payment method
                 try {
-                    ({ data: d2, error: err2 } = await supabase
+                    ({ data, error } = await supabase
                         .from('sales')
-                        .upsert(saleToSaveNoPM, { onConflict: 'receiptnumber' })
+                        .insert(saleToSaveNoPM)
                         .select());
-                    if (err2) {
-                        const msg2 = (err2 && err2.message) || '';
-                        const isNoConflict2 = msg2.toLowerCase().includes('on conflict') || msg2.toLowerCase().includes('unique or exclusion constraint');
-                        if (isNoConflict2) {
-                            let insData2, insErr2;
-                            try {
-                                ({ data: insData2, error: insErr2 } = await supabase
-                                    .from('sales')
-                                    .insert(saleToSaveNoPM)
-                                    .select());
-                            } catch (e3) {
-                                insErr2 = e3;
-                            }
-                            if (insErr2) throw insErr2;
-                            d2 = insData2;
-                        } else {
-                            throw err2;
-                        }
+                    if (error) {
+                        throw error;
                     }
-                } catch (e4) {
-                    throw e4;
+                } catch (e2) {
+                    // Final fallback: use fetch with auth headers
+                    try {
+                        const headers = await getAuthHeaders();
+                        const url = `${getCfg('supabaseUrl', supabaseUrl)}/rest/v1/sales`;
+                        const res = await fetch(url, {
+                            method: 'POST',
+                            headers: headers,
+                            body: JSON.stringify(saleToSaveNoPM)
+                        });
+                        if (res.ok) {
+                            const responseData = await res.json();
+                            data = Array.isArray(responseData) ? responseData : [responseData];
+                        } else {
+                            throw e2; // Throw original error if fetch also fails
+                        }
+                    } catch (fetchErr) {
+                        console.error('All sync attempts failed:', e, e2, fetchErr);
+                        throw e2;
+                    }
                 }
-                data = d2;
-                error = null;
             }
             
             if (error) throw error;
             
-            if (data && data.length > 0) {
+            if (data && (Array.isArray(data) ? data.length > 0 : data.id)) {
+                const savedData = Array.isArray(data) ? data[0] : data;
                 const localSaleIndex = sales.findIndex(s => s.receiptNumber === operation.data.receiptNumber);
                 if (localSaleIndex !== -1) {
-                    sales[localSaleIndex].id = data[0].id;
+                    sales[localSaleIndex].id = savedData.id;
                     sales[localSaleIndex].cashierId = validCashierId;
                     saveToLocalStorage();
                 }
