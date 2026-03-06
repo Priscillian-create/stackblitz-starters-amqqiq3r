@@ -38,7 +38,7 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
     navigator.serviceWorker.addEventListener('message', (e) => {
       const d = e && e.data;
       if (d && d.type === 'SW_ACTIVATED') {
-        try { location.reload(); } catch (_) {}
+        
       }
     });
   }
@@ -157,6 +157,7 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
   let expenses = [], purchases = [], stockAlerts = [], profitData = [];
   let expenseCategories = ['Rent', 'Utilities', 'Salaries', 'Supplies', 'Marketing', 'Maintenance', 'Other'];
   let appRealtimeChannel = null;
+  let reportsAutoTimer = null;
   // Removed pagination view mode to keep inventory consistent
   
   // Settings - Changed from const to let to allow reassignment
@@ -687,11 +688,35 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
                     .lte('created_at', endIso)
                     .order('created_at', { ascending: false })
                     .range(page * limit, page * limit + limit - 1);
-                if (error) break;
+                if (error) {
+                    const msg = (error.message || '').toLowerCase();
+                    if (msg.includes('no api key found')) {
+                        break;
+                    }
+                    break;
+                }
                 if (!data || data.length === 0) break;
                 acc.push(...data);
                 if (data.length < limit) break;
                 page++;
+            }
+            if (acc.length === 0) {
+                try {
+                    const base = getCfg('supabaseUrl', supabaseUrl);
+                    const key = getCfg('supabaseKey', supabaseKey);
+                    let offset = 0;
+                    const fallbackLimit = 100;
+                    while (true) {
+                        const url = `${base}/rest/v1/sales?select=*&created_at=gte.${encodeURIComponent(startIso)}&created_at=lte.${encodeURIComponent(endIso)}&order=created_at.desc&offset=${offset}&limit=${fallbackLimit}&apikey=${encodeURIComponent(key)}`;
+                        const res = await fetch(url, { method: 'GET' });
+                        if (!res.ok) break;
+                        const rows = await res.json();
+                        if (!Array.isArray(rows) || rows.length === 0) break;
+                        acc.push(...rows);
+                        if (rows.length < fallbackLimit) break;
+                        offset += rows.length;
+                    }
+                } catch (_) {}
             }
             if (acc.length) {
                 const normalized = acc.map(sale => {
@@ -828,14 +853,26 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
                             .from('products')
                             .select('id,name,category,price,stock,expirydate,barcode,deleted,updated_at')
                             .range(offset, offset + limit - 1));
-                        if (error) throw error;
+                        if (error) {
+                            const msg = (error.message || '').toLowerCase();
+                            if (msg.includes('no api key found')) {
+                                break;
+                            }
+                            throw error;
+                        }
                     } catch (e) {
                         withUpdatedAt = false;
                         ({ data, error } = await supabase
                             .from('products')
                             .select('id,name,category,price,stock,expirydate,barcode,deleted')
                             .range(offset, offset + limit - 1));
-                        if (error) throw error;
+                        if (error) {
+                            const msg = (error.message || '').toLowerCase();
+                            if (msg.includes('no api key found')) {
+                                break;
+                            }
+                            throw error;
+                        }
                     }
                     const batch = (data || []).map(p => {
                         if (p.expirydate && !p.expiryDate) p.expiryDate = p.expirydate;
@@ -907,7 +944,14 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
                         .gt('updated_at', sinceTs || '1970-01-01T00:00:00.000Z')
                         .order('updated_at', { ascending: true })
                         .range(page * limit, page * limit + limit - 1));
-                    if (error) throw error;
+                    if (error) {
+                        const msg = (error.message || '').toLowerCase();
+                        if (msg.includes('no api key found')) {
+                            usedUpdatedAt = false;
+                            break;
+                        }
+                        throw error;
+                    }
                 } catch (e) {
                     usedUpdatedAt = false;
                     break;
@@ -1730,32 +1774,25 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
   
             if (supabase && typeof supabase.from === 'function') {
                 try {
-                    // Simplify the user ID validation
-                    let validCashierId = currentUser?.id || '00000000-0000-0000-0000-000000000000';
+                    let validCashierId = await ensureValidUserId(currentUser?.id);
                     
-                    // If it's not a valid UUID, use the fallback ID
-                    if (!validCashierId.match(/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i)) {
-                        validCashierId = '00000000-0000-0000-0000-000000000000';
-                    }
-                    
-                    // IMPORTANT: Use the correct database column names (lowercase)
                     const saleToSaveWithPM = {
-                        receiptnumber: sale.receiptNumber,  // Database column: receiptnumber
-                        cashierid: validCashierId,          // Database column: cashierid
+                        receiptnumber: sale.receiptNumber,
                         items: sale.items,
                         total: sale.total,
                         created_at: sale.created_at,
                         cashier: sale.cashier,
                         paymentmethod: sale.paymentMethod
                     };
+                    if (validCashierId) saleToSaveWithPM.cashierid = validCashierId;
                     const saleToSaveNoPM = {
                         receiptnumber: sale.receiptNumber,
-                        cashierid: validCashierId,
                         items: sale.items,
                         total: sale.total,
                         created_at: sale.created_at,
                         cashier: sale.cashier
                     };
+                    if (validCashierId) saleToSaveNoPM.cashierid = validCashierId;
                     const { data: exist, error: existErr } = await supabase
                         .from('sales')
                         .select('id')
@@ -1765,10 +1802,10 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
                         const index = sales.findIndex(s => s.receiptNumber === sale.receiptNumber);
                         if (index >= 0) {
                             sales[index].id = exist[0].id;
-                            sales[index].cashierId = validCashierId;
+                            if (validCashierId) sales[index].cashierId = validCashierId;
                             saveToLocalStorage();
                         }
-                        return { success: true, sale: { ...sale, id: exist[0].id, cashierId: validCashierId } };
+                        return { success: true, sale: { ...sale, id: exist[0].id, ...(validCashierId ? { cashierId: validCashierId } : {}) } };
                     }
                     let data, error;
                     try {
@@ -1825,6 +1862,7 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
                             throw e4;
                         }
                         data = d2;
+                        error = null;
                     }
                     
                     if (error) {
@@ -1837,10 +1875,10 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
                         const index = sales.findIndex(s => s.receiptNumber === sale.receiptNumber);
                         if (index >= 0) {
                             sales[index].id = data[0].id;
-                            sales[index].cashierId = validCashierId;
+                            if (validCashierId) sales[index].cashierId = validCashierId;
                             saveToLocalStorage();
                         }
-                        return { success: true, sale: { ...sale, id: data[0].id, cashierId: validCashierId } };
+                        return { success: true, sale: { ...sale, id: data[0].id, ...(validCashierId ? { cashierId: validCashierId } : {}) } };
                     } else {
                         throw new Error('No data returned from insert operation');
                     }
@@ -2186,7 +2224,7 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
                 .from('users')
                 .select('id')
                 .eq('id', userId)
-                .single();
+                .maybeSingle();
             
             if (!error && data) return userId;
         } catch (error) {
@@ -2200,7 +2238,7 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
                 .from('users')
                 .select('id')
                 .eq('email', currentUser.email)
-                .single();
+                .maybeSingle();
             
             if (!error && data) {
                 currentUser.id = data.id;
@@ -2212,7 +2250,7 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
         }
     }
     
-    return '00000000-0000-0000-0000-000000000000';
+    return null;
   }
   
   async function syncSale(operation) {
@@ -2221,33 +2259,31 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
         let validCashierId = await ensureValidUserId(candidateId);
         operation.data.cashierId = validCashierId;
         
-        // IMPORTANT: Use receiptnumber (lowercase) to match the database column
         const { data: existingSales, error: fetchError } = await supabase
             .from('sales')
             .select('*')
-            .eq('receiptnumber', operation.data.receiptNumber);  // Database column: receiptnumber
+            .eq('receiptnumber', operation.data.receiptNumber);
         
         if (fetchError) throw fetchError;
         
         if (!existingSales || existingSales.length === 0) {
-            // IMPORTANT: Use the correct database column names (lowercase)
             const saleToSaveWithPM = {
-                receiptnumber: operation.data.receiptNumber,  // Database column: receiptnumber
-                cashierid: validCashierId,                    // Database column: cashierid
+                receiptnumber: operation.data.receiptNumber,
                 items: operation.data.items,
                 total: operation.data.total,
                 created_at: operation.data.created_at,
                 cashier: operation.data.cashier,
                 paymentmethod: operation.data.paymentMethod
             };
+            if (validCashierId) saleToSaveWithPM.cashierid = validCashierId;
             const saleToSaveNoPM = {
                 receiptnumber: operation.data.receiptNumber,
-                cashierid: validCashierId,
                 items: operation.data.items,
                 total: operation.data.total,
                 created_at: operation.data.created_at,
                 cashier: operation.data.cashier
             };
+            if (validCashierId) saleToSaveNoPM.cashierid = validCashierId;
             
             let data, error;
             try {
@@ -2304,6 +2340,7 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
                     throw e4;
                 }
                 data = d2;
+                error = null;
             }
             
             if (error) throw error;
@@ -2339,39 +2376,58 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
   async function syncProduct(operation) {
     try {
         if (operation.data.stock !== undefined && !operation.data.name) {
-            // IMPORTANT: Use the correct database column names (lowercase)
-            const { error } = await supabase
-                .from('products')
-                .update({ stock: operation.data.stock })
-                .eq('id', operation.data.id);
-            
-            if (error) throw error;
+            try {
+                const { error } = await supabase
+                    .from('products')
+                    .update({ stock: operation.data.stock })
+                    .eq('id', operation.data.id);
+                if (error) {
+                    if (error.code === '42703' && /updated_at/i.test(error.message || '')) {
+                        return true;
+                    }
+                    throw error;
+                }
+            } catch (e) {
+                if (e && e.code === '42703' && /updated_at/i.test(e.message || '')) {
+                    return true;
+                }
+                throw e;
+            }
         } else {
             if (operation.data.id && !operation.data.id.startsWith('temp_')) {
-                // IMPORTANT: Use the correct database column names (lowercase)
                 const productToSave = {
                     name: operation.data.name,
                     category: operation.data.category,
                     price: operation.data.price,
                     stock: operation.data.stock,
-                    expirydate: operation.data.expiryDate,  // Database column: expirydate
+                    expirydate: operation.data.expiryDate,
                     barcode: operation.data.barcode
                 };
                 
-                const { error } = await supabase
-                    .from('products')
-                    .update(productToSave)
-                    .eq('id', operation.data.id);
-                
-                if (error) throw error;
+                try {
+                    const { error } = await supabase
+                        .from('products')
+                        .update(productToSave)
+                        .eq('id', operation.data.id);
+                    if (error) {
+                        if (error.code === '42703' && /updated_at/i.test(error.message || '')) {
+                            return true;
+                        }
+                        throw error;
+                    }
+                } catch (e) {
+                    if (e && e.code === '42703' && /updated_at/i.test(e.message || '')) {
+                        return true;
+                    }
+                    throw e;
+                }
             } else {
-                // IMPORTANT: Use the correct database column names (lowercase)
                 const productToSave = {
                     name: operation.data.name,
                     category: operation.data.category,
                     price: operation.data.price,
                     stock: operation.data.stock,
-                    expirydate: operation.data.expiryDate,  // Database column: expirydate
+                    expirydate: operation.data.expiryDate,
                     barcode: operation.data.barcode
                 };
                 // Check if a matching product already exists (avoid double insert)
@@ -2406,12 +2462,24 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
                     }
                 } catch (_) {}
   
-                const { data, error } = await supabase
-                    .from('products')
-                    .upsert(productToSave, { onConflict: productToSave.barcode ? 'barcode' : undefined })
-                    .select();
-                
-                if (error) throw error;
+                let data, error;
+                try {
+                    ({ data, error } = await supabase
+                        .from('products')
+                        .upsert(productToSave, { onConflict: productToSave.barcode ? 'barcode' : undefined })
+                        .select());
+                    if (error) {
+                        if (error.code === '42703' && /updated_at/i.test(error.message || '')) {
+                            return true;
+                        }
+                        throw error;
+                    }
+                } catch (e) {
+                    if (e && e.code === '42703' && /updated_at/i.test(e.message || '')) {
+                        return true;
+                    }
+                    throw e;
+                }
                 
         if (data && data.length > 0) {
             const localProductIndex = products.findIndex(p => p.id === operation.data.id);
@@ -3580,6 +3648,11 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
         page.style.display = 'none';
     });
     
+    if (reportsAutoTimer && pageName !== 'reports') {
+        try { clearInterval(reportsAutoTimer); } catch (_) {}
+        reportsAutoTimer = null;
+    }
+    
     const selectedPage = document.getElementById(`${pageName}-page`);
     if (selectedPage) {
         selectedPage.style.display = 'block';
@@ -4107,6 +4180,17 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
     }).catch(() => {
         generateReport();
     });
+    
+    if (reportsAutoTimer) {
+        try { clearInterval(reportsAutoTimer); } catch (_) {}
+        reportsAutoTimer = null;
+    }
+    reportsAutoTimer = setInterval(() => {
+        if (currentPage !== 'reports') return;
+        try {
+            refreshReportData();
+        } catch (_) {}
+    }, 5000);
   }
   
   function refreshReportData() {
@@ -4759,11 +4843,9 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
     completeSaleBtn.disabled = true;
     
     try {
-        let validCashierId = currentUser?.id || '00000000-0000-0000-0000-000000000000';
-        
-        // If it's not a valid UUID, use the fallback ID
-        if (!validCashierId.match(/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i)) {
-            validCashierId = '00000000-0000-0000-0000-000000000000';
+        let validCashierId = currentUser?.id || null;
+        if (validCashierId && !validCashierId.match(/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i)) {
+            validCashierId = null;
         }
         
         const pmEl = document.getElementById('payment-method');
@@ -4779,10 +4861,12 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
             cashierId: validCashierId,
             paymentMethod: paymentMethod
         };
+        const localResult = DataModule.saveSaleLocally(sale);
+        (async () => {
+            try { await DataModule.saveSale(sale); } catch (_) {}
+        })();
         
-        const result = await DataModule.saveSale(sale);
-        
-        if (result.success) {
+        if (localResult.success) {
             for (const cartItem of cart) {
                 const product = products.find(p => p.id === cartItem.id);
                 if (product) {
@@ -4811,7 +4895,7 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
                 loadStockCheck();
             } catch (_) {}
             
-            showReceipt(result.sale);
+            showReceipt(localResult.sale);
             
             cart = [];
             updateCart();
