@@ -846,6 +846,7 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
                 let offset = 0;
                 const limit = PRODUCTS_PAGE_SIZE;
                 let withUpdatedAt = true;
+                let missingApiKey = false;
                 while (true) {
                     let data, error;
                     try {
@@ -856,6 +857,7 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
                         if (error) {
                             const msg = (error.message || '').toLowerCase();
                             if (msg.includes('no api key found')) {
+                                missingApiKey = true;
                                 break;
                             }
                             throw error;
@@ -869,6 +871,7 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
                         if (error) {
                             const msg = (error.message || '').toLowerCase();
                             if (msg.includes('no api key found')) {
+                                missingApiKey = true;
                                 break;
                             }
                             throw error;
@@ -881,6 +884,35 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
                     acc.push(...batch);
                     if (!data || data.length < limit) break;
                     offset += limit;
+                }
+                if (acc.length === 0 && missingApiKey) {
+                    try {
+                        const base = getCfg('supabaseUrl', supabaseUrl);
+                        const key = getCfg('supabaseKey', supabaseKey);
+                        offset = 0;
+                        const fallbackLimit = PRODUCTS_PAGE_SIZE;
+                        while (true) {
+                            const url = `${base}/rest/v1/products?select=id,name,category,price,stock,expirydate,barcode,deleted,updated_at&offset=${offset}&limit=${fallbackLimit}`;
+                            const res = await fetch(url, {
+                                method: 'GET',
+                                headers: {
+                                    apikey: key,
+                                    Authorization: `Bearer ${key}`
+                                }
+                            });
+                            if (!res.ok) break;
+                            const rows = await res.json();
+                            if (!Array.isArray(rows) || rows.length === 0) break;
+                            const batch = rows.map(p => {
+                                if (p.expirydate && !p.expiryDate) p.expiryDate = p.expirydate;
+                                return p;
+                            }).filter(p => !p.deleted);
+                            acc.push(...batch);
+                            if (rows.length < fallbackLimit) break;
+                            offset += rows.length;
+                        }
+                        withUpdatedAt = true;
+                    } catch (_) {}
                 }
                 const pending = getPendingStockOverrides();
                 acc.forEach(p => {
@@ -935,6 +967,7 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
             let page = 0;
             const updates = [];
             let usedUpdatedAt = true;
+            let missingApiKey = false;
             while (true) {
                 let data, error;
                 try {
@@ -948,6 +981,7 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
                         const msg = (error.message || '').toLowerCase();
                         if (msg.includes('no api key found')) {
                             usedUpdatedAt = false;
+                            missingApiKey = true;
                             break;
                         }
                         throw error;
@@ -964,6 +998,35 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
                 updates.push(...batch);
                 if (data.length < limit) break;
                 page++;
+            }
+            if (!usedUpdatedAt && missingApiKey) {
+                try {
+                    const base = getCfg('supabaseUrl', supabaseUrl);
+                    const key = getCfg('supabaseKey', supabaseKey);
+                    let offset = 0;
+                    const fallbackLimit = PRODUCTS_PAGE_SIZE;
+                    while (true) {
+                        const url = `${base}/rest/v1/products?select=id,name,category,price,stock,expirydate,barcode,deleted,updated_at&updated_at=gt.${encodeURIComponent(sinceTs || '1970-01-01T00:00:00.000Z')}&order=updated_at.asc&offset=${offset}&limit=${fallbackLimit}`;
+                        const res = await fetch(url, {
+                            method: 'GET',
+                            headers: {
+                                apikey: key,
+                                Authorization: `Bearer ${key}`
+                            }
+                        });
+                        if (!res.ok) break;
+                        const rows = await res.json();
+                        if (!Array.isArray(rows) || rows.length === 0) break;
+                        const batch = rows.map(p => {
+                            if (p.expirydate && !p.expiryDate) p.expiryDate = p.expirydate;
+                            return p;
+                        });
+                        updates.push(...batch);
+                        if (rows.length < fallbackLimit) break;
+                        offset += rows.length;
+                    }
+                    usedUpdatedAt = true;
+                } catch (_) {}
             }
             if (!usedUpdatedAt) {
                 await DataModule.fetchAllProducts();
