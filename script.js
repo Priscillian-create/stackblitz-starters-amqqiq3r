@@ -157,7 +157,6 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
   let expenses = [], purchases = [], stockAlerts = [], profitData = [];
   let expenseCategories = ['Rent', 'Utilities', 'Salaries', 'Supplies', 'Marketing', 'Maintenance', 'Other'];
   let appRealtimeChannel = null;
-  let reportsAutoTimer = null;
   // Removed pagination view mode to keep inventory consistent
   
   // Settings - Changed from const to let to allow reassignment
@@ -3624,11 +3623,6 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
         page.style.display = 'none';
     });
     
-    if (reportsAutoTimer && pageName !== 'reports') {
-        try { clearInterval(reportsAutoTimer); } catch (_) {}
-        reportsAutoTimer = null;
-    }
-    
     const selectedPage = document.getElementById(`${pageName}-page`);
     if (selectedPage) {
         selectedPage.style.display = 'block';
@@ -4156,17 +4150,6 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
     }).catch(() => {
         generateReport();
     });
-    
-    if (reportsAutoTimer) {
-        try { clearInterval(reportsAutoTimer); } catch (_) {}
-        reportsAutoTimer = null;
-    }
-    reportsAutoTimer = setInterval(() => {
-        if (currentPage !== 'reports') return;
-        try {
-            refreshReportData();
-        } catch (_) {}
-    }, 5000);
   }
   
   function refreshReportData() {
