@@ -2050,6 +2050,7 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
             // 1. Delete from local storage immediately for instant UI feedback
             const saleIndex = sales.findIndex(s => s.id === saleId);
             let sale = null;
+            let receiptNo = null;
             
             if (saleIndex >= 0) {
                 sale = sales[saleIndex];
@@ -2062,12 +2063,14 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
                     return { success: false, error: 'Sale not found' };
                 }
             }
+            receiptNo = sale?.receiptnumber || sale?.receiptNumber || null;
             
             // 2. If offline, queue the delete and return immediately
             if (!isOnline) {
                 addToSyncQueue({
                     type: 'deleteSale',
-                    id: saleId
+                    id: saleId,
+                    receiptNumber: receiptNo
                 });
                 return { success: true };
             }
@@ -2084,7 +2087,6 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
                     
                     if (deleteError) {
                         // Try to delete by receipt number if ID doesn't work
-                        const receiptNo = sale?.receiptnumber || sale?.receiptNumber;
                         if (receiptNo) {
                             const { error: deleteByReceiptErr } = await supabase
                                 .from('sales')
@@ -2096,7 +2098,8 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
                                 // Add to sync queue for retry
                                 addToSyncQueue({
                                     type: 'deleteSale',
-                                    id: saleId
+                                    id: saleId,
+                                    receiptNumber: receiptNo
                                 });
                             }
                         }
@@ -2106,7 +2109,8 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
                     // Queue for retry
                     addToSyncQueue({
                         type: 'deleteSale',
-                        id: saleId
+                        id: saleId,
+                        receiptNumber: receiptNo
                     });
                 }
             })();
@@ -2648,7 +2652,7 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
         
         if (fetchError || !saleData) {
             const localSale = deletedSales.find(s => s.id === operation.id) || sales.find(s => s.id === operation.id);
-            const receiptNo = localSale?.receiptnumber || localSale?.receiptNumber;
+            let receiptNo = operation?.receiptNumber || localSale?.receiptnumber || localSale?.receiptNumber;
             if (receiptNo) {
                 const { data: byReceipt, error: byReceiptErr } = await supabase
                     .from('sales')
