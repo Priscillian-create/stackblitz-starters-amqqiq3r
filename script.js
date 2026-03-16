@@ -54,7 +54,15 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
     }
     const render = (list) => {
         if (!stockTableBody) return;
-        const items = (list || []).filter(p => p && !p.deleted);
+        // Apply pending stock overrides before rendering
+        const pendingOverrides = getPendingStockOverrides();
+        const adjustedList = (list || []).map(p => {
+            if (p && pendingOverrides.has(p.id)) {
+                return { ...p, stock: pendingOverrides.get(p.id) };
+            }
+            return p;
+        });
+        const items = adjustedList.filter(p => p && !p.deleted);
         if (items.length === 0) {
             stockTableBody.innerHTML = '<tr><td colspan="5" style="text-align: center;">No products</td></tr>';
             return;
@@ -113,6 +121,107 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
             }
         }).catch(() => {});
     }
+  }
+
+  function loadStockHistory() {
+    // Populate product filter
+    const productFilter = document.getElementById('history-product-filter');
+    if (productFilter) {
+        productFilter.innerHTML = '<option value="">All Products</option>';
+        products.filter(p => p && !p.deleted).forEach(product => {
+            const option = document.createElement('option');
+            option.value = product.id;
+            option.textContent = product.name;
+            productFilter.appendChild(option);
+        });
+    }
+    
+    // Set default date range (last 30 days)
+    const dateTo = document.getElementById('history-date-to');
+    const dateFrom = document.getElementById('history-date-from');
+    if (dateTo && dateFrom) {
+        const today = new Date();
+        const thirtyDaysAgo = new Date();
+        thirtyDaysAgo.setDate(today.getDate() - 30);
+        
+        dateTo.value = today.toISOString().split('T')[0];
+        dateFrom.value = thirtyDaysAgo.toISOString().split('T')[0];
+    }
+    
+    renderStockHistory();
+  }
+
+  function renderStockHistory() {
+    const tableBody = document.getElementById('stock-history-table-body');
+    if (!tableBody) return;
+    
+    // Get filters
+    const productFilter = document.getElementById('history-product-filter')?.value || '';
+    const dateFrom = document.getElementById('history-date-from')?.value || '';
+    const dateTo = document.getElementById('history-date-to')?.value || '';
+    const typeFilter = document.getElementById('history-type-filter')?.value || '';
+    const searchTerm = document.getElementById('history-search')?.value?.toLowerCase() || '';
+    
+    // Filter movements
+    let filteredMovements = [...stockMovements];
+    
+    if (productFilter) {
+        filteredMovements = filteredMovements.filter(m => m.productId === productFilter);
+    }
+    
+    if (dateFrom) {
+        const fromDate = new Date(dateFrom);
+        filteredMovements = filteredMovements.filter(m => new Date(m.created_at) >= fromDate);
+    }
+    
+    if (dateTo) {
+        const toDate = new Date(dateTo);
+        toDate.setHours(23, 59, 59, 999); // End of day
+        filteredMovements = filteredMovements.filter(m => new Date(m.created_at) <= toDate);
+    }
+    
+    if (typeFilter) {
+        filteredMovements = filteredMovements.filter(m => m.type === typeFilter);
+    }
+    
+    if (searchTerm) {
+        filteredMovements = filteredMovements.filter(m => 
+            m.productName?.toLowerCase().includes(searchTerm) ||
+            m.reference?.toLowerCase().includes(searchTerm) ||
+            m.cashier?.toLowerCase().includes(searchTerm)
+        );
+    }
+    
+    // Sort by date descending
+    filteredMovements.sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+    
+    if (filteredMovements.length === 0) {
+        tableBody.innerHTML = '<tr><td colspan="8" style="text-align: center;">No stock movements found</td></tr>';
+        return;
+    }
+    
+    tableBody.innerHTML = '';
+    const frag = document.createDocumentFragment();
+    
+    filteredMovements.forEach(movement => {
+        const tr = document.createElement('tr');
+        const date = new Date(movement.created_at).toLocaleDateString();
+        const time = new Date(movement.created_at).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'});
+        
+        tr.innerHTML = `
+            <td>${date} ${time}</td>
+            <td>${movement.productName || 'Unknown'}</td>
+            <td><span class="movement-type ${movement.type}">${movement.type || 'unknown'}</span></td>
+            <td class="${movement.quantity < 0 ? 'negative' : 'positive'}">${movement.quantity > 0 ? '+' : ''}${movement.quantity}</td>
+            <td>${movement.oldStock || 0}</td>
+            <td>${movement.newStock || 0}</td>
+            <td>${movement.reference || '-'}</td>
+            <td>${movement.cashier || 'Unknown'}</td>
+        `;
+        frag.appendChild(tr);
+    });
+    
+    tableBody.appendChild(frag);
   }
 
   function getPendingStockOverrides() {
@@ -186,7 +295,7 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
   const MAX_RETRY_ATTEMPTS = 3, RETRY_DELAY = 5000;
   
   // New global variables for extended features
-  let expenses = [], purchases = [], stockAlerts = [], profitData = [];
+  let expenses = [], purchases = [], stockAlerts = [], profitData = [], stockMovements = [];
   let expenseCategories = ['Rent', 'Utilities', 'Salaries', 'Supplies', 'Marketing', 'Maintenance', 'Other'];
   let appRealtimeChannel = null;
   let reportsAutoTimer = null;
@@ -237,6 +346,7 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
     PURCHASES: 'pagerrysmart_purchases',
     STOCK_ALERTS: 'pagerrysmart_stock_alerts',
     PROFIT_DATA: 'pagerrysmart_profit_data',
+    STOCK_MOVEMENTS: 'pagerrysmart_stock_movements',
     PRODUCTS_SYNC_TS: 'pagerrysmart_products_sync_ts',
     SALES_SYNC_TS: 'pagerrysmart_sales_sync_ts'
   };
@@ -3149,6 +3259,7 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
         purchases = [];
         stockAlerts = [];
         profitData = [];
+        stockMovements = [];
         
         // Load products
         const savedProducts = localStorage.getItem(STORAGE_KEYS.PRODUCTS);
@@ -3288,6 +3399,18 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
             }
         }
         
+        // Load stock movements
+        const savedStockMovements = localStorage.getItem(STORAGE_KEYS.STOCK_MOVEMENTS);
+        if (savedStockMovements) {
+            try {
+                stockMovements = JSON.parse(savedStockMovements);
+            } catch (parseError) {
+                console.error('Error parsing stock movements from localStorage:', parseError);
+                stockMovements = [];
+                try { localStorage.removeItem(STORAGE_KEYS.STOCK_MOVEMENTS); } catch (_) {}
+            }
+        }
+        
         try {
             const ts = localStorage.getItem(STORAGE_KEYS.PRODUCTS_SYNC_TS);
             if (ts) lastProductsSyncTs = ts;
@@ -3322,6 +3445,7 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
         localStorage.setItem(STORAGE_KEYS.PURCHASES, JSON.stringify(purchases));
         localStorage.setItem(STORAGE_KEYS.STOCK_ALERTS, JSON.stringify(stockAlerts));
         localStorage.setItem(STORAGE_KEYS.PROFIT_DATA, JSON.stringify(profitData));
+        localStorage.setItem(STORAGE_KEYS.STOCK_MOVEMENTS, JSON.stringify(stockMovements));
         localStorage.setItem(STORAGE_KEYS.PRODUCTS_SYNC_TS, String(lastProductsSyncTs || '1970-01-01T00:00:00.000Z'));
         localStorage.setItem(STORAGE_KEYS.SALES_SYNC_TS, String(lastSalesSyncTs || '1970-01-01T00:00:00.000Z'));
         
@@ -3790,6 +3914,7 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
         'inventory': 'Inventory Management',
         'reports': 'Sales Reports',
         'stock': 'Stock Check',
+        'stock-history': 'Stock History',
         'expenses': 'Expense Management',
         'purchases': 'Purchase Management',
         'analytics': 'Business Analytics',
@@ -3815,6 +3940,8 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
         } catch (_) {}
     } else if (pageName === 'stock') {
         loadStockCheck();
+    } else if (pageName === 'stock-history') {
+        loadStockHistory();
     } else if (pageName === 'account') {
         loadAccount();
     } else if (pageName === 'expenses') {
@@ -3848,7 +3975,13 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
   
   // Product Functions
   function loadProducts() {
-    const list = products.filter(p => !p.deleted);
+    const pendingOverrides = getPendingStockOverrides();
+    const list = products.filter(p => !p.deleted).map(p => {
+        if (pendingOverrides.has(p.id)) {
+            return { ...p, stock: pendingOverrides.get(p.id) };
+        }
+        return p;
+    });
     if (list.length === 0) {
         productsGrid.innerHTML = `
             <div class="empty-state">
@@ -3911,7 +4044,13 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
     if (inventoryLoading) inventoryLoading.style.display = 'none';
     dedupeProducts();
     updateInventoryTotalFromAllProducts();
-    const baseList = products.filter(p => !p.deleted);
+    const pendingOverrides = getPendingStockOverrides();
+    const baseList = products.filter(p => !p.deleted).map(p => {
+        if (pendingOverrides.has(p.id)) {
+            return { ...p, stock: pendingOverrides.get(p.id) };
+        }
+        return p;
+    });
     const msPerDay = 1000 * 60 * 60 * 24;
     const todayTs = Date.now();
     let list;
@@ -5028,7 +5167,23 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
             for (const cartItem of cart) {
                 const product = products.find(p => p.id === cartItem.id);
                 if (product) {
+                    const oldStock = product.stock;
                     product.stock -= cartItem.quantity;
+                    
+                    // Record stock movement
+                    const movement = {
+                        id: 'movement_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9),
+                        productId: product.id,
+                        productName: product.name,
+                        type: 'sale',
+                        quantity: -cartItem.quantity, // Negative for reduction
+                        oldStock: oldStock,
+                        newStock: product.stock,
+                        reference: sale.receiptNumber,
+                        created_at: new Date().toISOString(),
+                        cashier: currentUser?.name || 'Unknown'
+                    };
+                    stockMovements.push(movement);
                     
                     addToSyncQueue({
                         type: 'saveProduct',
@@ -6444,6 +6599,30 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
     });
   }
   
+  // Stock History event listeners
+  const refreshStockHistoryBtn = document.getElementById('refresh-stock-history-btn');
+  const applyHistoryFiltersBtn = document.getElementById('apply-history-filters-btn');
+  const historySearchEl = document.getElementById('history-search');
+  
+  if (refreshStockHistoryBtn) {
+    refreshStockHistoryBtn.addEventListener('click', () => {
+        loadStockHistory();
+    });
+  }
+  
+  if (applyHistoryFiltersBtn) {
+    applyHistoryFiltersBtn.addEventListener('click', () => {
+        renderStockHistory();
+    });
+  }
+  
+  if (historySearchEl) {
+    const handler = debounce(() => {
+        renderStockHistory();
+    }, 150);
+    historySearchEl.addEventListener('input', handler);
+  }
+  
   // Inventory search
   function applyInventorySearch(searchTerm) {
     const term = (searchTerm || '').toLowerCase();
@@ -6590,17 +6769,25 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
   }
   
   function updateInventoryTotalFromAllProducts() {
+    const pendingOverrides = getPendingStockOverrides();
+    const adjustedProducts = products
+        .filter(p => !p.deleted)
+        .map(p => {
+            if (pendingOverrides.has(p.id)) {
+                return { ...p, stock: pendingOverrides.get(p.id) };
+            }
+            return p;
+        });
+    
     const inventoryTotalValue = document.getElementById('inventory-total-value');
     if (inventoryTotalValue) {
-        const totalValue = products
-            .filter(p => !p.deleted)
+        const totalValue = adjustedProducts
             .reduce((sum, p) => sum + ((Number(p.price) || 0) * (Number(p.stock) || 0)), 0);
         inventoryTotalValue.textContent = formatCurrency(totalValue);
     }
     const inventoryTotalItems = document.getElementById('inventory-total-items');
     if (inventoryTotalItems) {
-        const totalUnits = products
-            .filter(p => !p.deleted)
+        const totalUnits = adjustedProducts
             .reduce((s, p) => s + (Number(p.stock) || 0), 0);
         inventoryTotalItems.textContent = String(totalUnits);
     }
