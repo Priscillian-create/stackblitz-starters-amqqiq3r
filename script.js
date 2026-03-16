@@ -3188,7 +3188,7 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
             dedupeProducts();
             try { const t = p.updated_at ? new Date(p.updated_at).toISOString() : null; if (t && t > lastProductsSyncTs) lastProductsSyncTs = t; } catch(_) {}
             saveToLocalStorage();
-            if (currentPage === 'inventory') loadInventory(); else if (currentPage === 'stock') loadStockCheck(); else loadProducts();
+            if (currentPage === 'inventory') loadInventory(); else if (currentPage === 'stock') loadStockCheck(); else if (currentPage === 'stock-history') renderStockHistory(); else loadProducts();
             checkAndGenerateAlerts();
         } catch (_) {}
     });
@@ -3198,7 +3198,7 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
             if (!p) return;
             products = products.filter(x => x.id !== p.id);
             saveToLocalStorage();
-            if (currentPage === 'inventory') loadInventory(); else if (currentPage === 'stock') loadStockCheck(); else loadProducts();
+            if (currentPage === 'inventory') loadInventory(); else if (currentPage === 'stock') loadStockCheck(); else if (currentPage === 'stock-history') renderStockHistory(); else loadProducts();
             checkAndGenerateAlerts();
         } catch (_) {}
     });
@@ -3214,6 +3214,9 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
                 try { const t = s.updated_at ? new Date(s.updated_at).toISOString() : null; if (t && t > lastSalesSyncTs) lastSalesSyncTs = t; } catch(_) {}
                 saveToLocalStorage();
                 loadSales();
+                if (currentPage === 'stock-history') {
+                    fetchStockMovements().then(() => renderStockHistory());
+                }
             }
         } catch (_) {}
     });
@@ -3227,6 +3230,9 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
                 sales[idx] = { ...sales[idx], ...s };
                 saveToLocalStorage();
                 loadSales();
+                if (currentPage === 'stock-history') {
+                    fetchStockMovements().then(() => renderStockHistory());
+                }
             }
         } catch (_) {}
     });
@@ -3238,6 +3244,9 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
             sales = sales.filter(x => x.receiptNumber !== rn);
             saveToLocalStorage();
             loadSales();
+            if (currentPage === 'stock-history') {
+                fetchStockMovements().then(() => renderStockHistory());
+            }
         } catch (_) {}
     });
   
@@ -3249,6 +3258,14 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
         });
     });
   
+    channel.on('postgres_changes', { event: '*', schema: 'public', table: 'stock_movements' }, () => {
+        fetchStockMovements().then(() => {
+            if (currentPage === 'stock-history') {
+                renderStockHistory();
+            }
+        });
+    });
+  
     channel.on('postgres_changes', { event: '*', schema: 'public', table: 'expenses' }, () => {
         DataModule.fetchExpenses().then(updatedExpenses => {
             expenses = updatedExpenses;
@@ -3256,6 +3273,11 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
             if (currentPage === 'expenses') {
                 loadExpenses();
             }
+            try {
+                if (typeof window.updateAnalyticsSummary === 'function') {
+                    window.updateAnalyticsSummary();
+                }
+            } catch (_) {}
         });
     });
   
@@ -3266,6 +3288,11 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
             if (currentPage === 'purchases') {
                 loadPurchases();
             }
+            try {
+                if (typeof window.updateAnalyticsSummary === 'function') {
+                    window.updateAnalyticsSummary();
+                }
+            } catch (_) {}
         });
     });
     
@@ -5263,6 +5290,9 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
                 updateInventoryTotalFromAllProducts();
                 loadInventory();
                 loadStockCheck();
+                if (currentPage === 'stock-history') {
+                    renderStockHistory();
+                }
             } catch (_) {}
             
             showReceipt(localResult.sale);
@@ -5463,6 +5493,10 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
             loadStockAlerts();
         }
         
+        if (currentPage === 'stock-history') {
+            renderStockHistory();
+        }
+        
         showNotification(productId ? 'Product updated successfully' : 'Product added successfully', 'success');
     }
   }
@@ -5511,6 +5545,10 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
         
         if (currentPage === 'analytics') {
             loadStockAlerts();
+        }
+        
+        if (currentPage === 'stock-history') {
+            renderStockHistory();
         }
         
         showNotification('Product deleted successfully', 'success');
@@ -5652,6 +5690,9 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
         
         loadProducts();
         loadSales();
+        if (currentPage === 'stock-history') {
+            renderStockHistory();
+        }
         try { generateReport(); } catch (_) {}
         
         if (currentPage === 'inventory') {
@@ -5790,6 +5831,11 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
             closeExpenseModal();
             loadExpenses();
             showNotification('Expense saved successfully', 'success');
+            try {
+                if (typeof window.updateAnalyticsSummary === 'function') {
+                    window.updateAnalyticsSummary();
+                }
+            } catch (_) {}
         } else {
             showNotification('Failed to save expense. Please try again.', 'error');
         }
@@ -6114,6 +6160,11 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
             closePurchaseModal();
             loadPurchases();
             showNotification('Purchase saved successfully', 'success');
+            try {
+                if (typeof window.updateAnalyticsSummary === 'function') {
+                    window.updateAnalyticsSummary();
+                }
+            } catch (_) {}
         } else {
             showNotification('Failed to save purchase. Please try again.', 'error');
         }
