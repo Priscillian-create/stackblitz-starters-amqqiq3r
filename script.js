@@ -2357,6 +2357,8 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
                 success = await syncDeleteExpense(operation);
             } else if (operation.type === 'deletePurchase') {
                 success = await syncDeletePurchase(operation);
+            } else if (operation.type === 'saveStockMovement') {
+                success = await syncStockMovement(operation);
             }
             
             if (success) {
@@ -2392,6 +2394,29 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
             syncStatusText.textContent = `${syncQueue.length} operations pending`;
             setTimeout(() => syncStatus.classList.remove('show', 'error'), 3000);
         }
+    }
+  }
+  
+  async function fetchStockMovements() {
+    if (!isOnline) return;
+    
+    try {
+      const { data, error } = await supabase
+        .from('stock_movements')
+        .select('*')
+        .order('created_at', { ascending: false });
+      
+      if (error) {
+        console.error('Error fetching stock movements:', error);
+        return;
+      }
+      
+      // Update local stockMovements array
+      stockMovements = data || [];
+      localStorage.setItem(STORAGE_KEYS.STOCK_MOVEMENTS, JSON.stringify(stockMovements));
+      
+    } catch (error) {
+      console.error('Error in fetchStockMovements:', error);
     }
   }
   
@@ -3017,6 +3042,33 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
         return true;
     } catch (error) {
         console.error('Error syncing purchase deletion:', error);
+        return false;
+    }
+  }
+  
+  async function syncStockMovement(operation) {
+    try {
+        const movementData = {
+            id: operation.data.id,
+            product_id: operation.data.productId,
+            product_name: operation.data.productName,
+            type: operation.data.type,
+            quantity: operation.data.quantity,
+            old_stock: operation.data.oldStock,
+            new_stock: operation.data.newStock,
+            reference: operation.data.reference,
+            created_at: operation.data.created_at,
+            cashier: operation.data.cashier
+        };
+        
+        const { error } = await supabase
+            .from('stock_movements')
+            .upsert(movementData, { onConflict: 'id' });
+            
+        if (error) throw error;
+        return true;
+    } catch (error) {
+        console.error('Error syncing stock movement:', error);
         return false;
     }
   }
@@ -5186,6 +5238,11 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
                     stockMovements.push(movement);
                     
                     addToSyncQueue({
+                        type: 'saveStockMovement',
+                        data: movement
+                    });
+                    
+                    addToSyncQueue({
                         type: 'saveProduct',
                         data: {
                             id: product.id,
@@ -5572,6 +5629,12 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
         } catch (error) {
             console.error('Error fetching purchases:', error);
             newPurchases = purchases;
+        }
+        
+        try {
+            await fetchStockMovements();
+        } catch (error) {
+            console.error('Error fetching stock movements:', error);
         }
         
         products = newProducts;
