@@ -54,15 +54,7 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
     }
     const render = (list) => {
         if (!stockTableBody) return;
-        // Apply pending stock overrides before rendering
-        const pendingOverrides = getPendingStockOverrides();
-        const adjustedList = (list || []).map(p => {
-            if (p && pendingOverrides.has(p.id)) {
-                return { ...p, stock: pendingOverrides.get(p.id) };
-            }
-            return p;
-        });
-        const items = adjustedList.filter(p => p && !p.deleted);
+        const items = (list || []).filter(p => p && !p.deleted);
         if (items.length === 0) {
             stockTableBody.innerHTML = '<tr><td colspan="5" style="text-align: center;">No products</td></tr>';
             return;
@@ -123,105 +115,17 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
     }
   }
 
-  function loadStockHistory() {
-    // Populate product filter
-    const productFilter = document.getElementById('history-product-filter');
-    if (productFilter) {
-        productFilter.innerHTML = '<option value="">All Products</option>';
-        products.filter(p => p && !p.deleted).forEach(product => {
-            const option = document.createElement('option');
-            option.value = product.id;
-            option.textContent = product.name;
-            productFilter.appendChild(option);
-        });
-    }
+  function applyPendingStockOverrides(list) {
+    if (!list || !Array.isArray(list)) return list;
+    const pending = getPendingStockOverrides();
+    if (pending.size === 0) return list;
     
-    // Set default date range (last 30 days)
-    const dateTo = document.getElementById('history-date-to');
-    const dateFrom = document.getElementById('history-date-from');
-    if (dateTo && dateFrom) {
-        const today = new Date();
-        const thirtyDaysAgo = new Date();
-        thirtyDaysAgo.setDate(today.getDate() - 30);
-        
-        dateTo.value = today.toISOString().split('T')[0];
-        dateFrom.value = thirtyDaysAgo.toISOString().split('T')[0];
-    }
-    
-    renderStockHistory();
-  }
-
-  function renderStockHistory() {
-    const tableBody = document.getElementById('stock-history-table-body');
-    if (!tableBody) return;
-    
-    // Get filters
-    const productFilter = document.getElementById('history-product-filter')?.value || '';
-    const dateFrom = document.getElementById('history-date-from')?.value || '';
-    const dateTo = document.getElementById('history-date-to')?.value || '';
-    const typeFilter = document.getElementById('history-type-filter')?.value || '';
-    const searchTerm = document.getElementById('history-search')?.value?.toLowerCase() || '';
-    
-    // Filter movements
-    let filteredMovements = [...stockMovements];
-    
-    if (productFilter) {
-        filteredMovements = filteredMovements.filter(m => m.productId === productFilter);
-    }
-    
-    if (dateFrom) {
-        const fromDate = new Date(dateFrom);
-        filteredMovements = filteredMovements.filter(m => new Date(m.created_at) >= fromDate);
-    }
-    
-    if (dateTo) {
-        const toDate = new Date(dateTo);
-        toDate.setHours(23, 59, 59, 999); // End of day
-        filteredMovements = filteredMovements.filter(m => new Date(m.created_at) <= toDate);
-    }
-    
-    if (typeFilter) {
-        filteredMovements = filteredMovements.filter(m => m.type === typeFilter);
-    }
-    
-    if (searchTerm) {
-        filteredMovements = filteredMovements.filter(m => 
-            m.productName?.toLowerCase().includes(searchTerm) ||
-            m.reference?.toLowerCase().includes(searchTerm) ||
-            m.cashier?.toLowerCase().includes(searchTerm)
-        );
-    }
-    
-    // Sort by date descending
-    filteredMovements.sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
-    
-    if (filteredMovements.length === 0) {
-        tableBody.innerHTML = '<tr><td colspan="8" style="text-align: center;">No stock movements found</td></tr>';
-        return;
-    }
-    
-    tableBody.innerHTML = '';
-    const frag = document.createDocumentFragment();
-    
-    filteredMovements.forEach(movement => {
-        const tr = document.createElement('tr');
-        const date = new Date(movement.created_at).toLocaleDateString();
-        const time = new Date(movement.created_at).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'});
-        
-        tr.innerHTML = `
-            <td>${date} ${time}</td>
-            <td>${movement.productName || 'Unknown'}</td>
-            <td><span class="movement-type ${movement.type}">${movement.type || 'unknown'}</span></td>
-            <td class="${movement.quantity < 0 ? 'negative' : 'positive'}">${movement.quantity > 0 ? '+' : ''}${movement.quantity}</td>
-            <td>${movement.oldStock || 0}</td>
-            <td>${movement.newStock || 0}</td>
-            <td>${movement.reference || '-'}</td>
-            <td>${movement.cashier || 'Unknown'}</td>
-        `;
-        frag.appendChild(tr);
+    list.forEach(p => {
+      if (p && p.id && pending.has(p.id)) {
+        p.stock = pending.get(p.id);
+      }
     });
-    
-    tableBody.appendChild(frag);
+    return list;
   }
 
   function getPendingStockOverrides() {
@@ -291,31 +195,92 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
   let productsHasMore = true;
   let isLoadingProducts = false;
   let currentPage = "pos", isOnline = navigator.onLine, syncQueue = [];
+  let pendingPostSyncRefresh = false;
+  let pendingRemoteUpdate = false;
   let connectionRetryCount = 0;
   const MAX_RETRY_ATTEMPTS = 3, RETRY_DELAY = 5000;
   
   // New global variables for extended features
-  let expenses = [], purchases = [], stockAlerts = [], profitData = [], stockMovements = [];
+  let expenses = [], purchases = [], stockAlerts = [], profitData = [];
   let expenseCategories = ['Rent', 'Utilities', 'Salaries', 'Supplies', 'Marketing', 'Maintenance', 'Other'];
   let appRealtimeChannel = null;
   let reportsAutoTimer = null;
   // Removed pagination view mode to keep inventory consistent
   
+  function isUserBusy() {
+    // User is busy if they are typing in a search bar or have items in their cart
+    const activeEl = document.activeElement;
+    const isTyping = activeEl && (activeEl.tagName === 'INPUT' || activeEl.tagName === 'TEXTAREA');
+    const hasCartItems = cart && cart.length > 0;
+    return isTyping || hasCartItems;
+  }
+
+  function normalizeSyncTs(ts) {
+    try {
+      const t = new Date(ts || '1970-01-01T00:00:00.000Z').getTime();
+      const now = Date.now();
+      if (!isFinite(t)) return '1970-01-01T00:00:00.000Z';
+      if (t > now + 5 * 60 * 1000) return '1970-01-01T00:00:00.000Z';
+      return new Date(t).toISOString();
+    } catch (_) {
+      return '1970-01-01T00:00:00.000Z';
+    }
+  }
+
+  function refreshVisibleData() {
+    if (currentPage === 'inventory') loadInventory();
+    else if (currentPage === 'stock') loadStockCheck();
+    else if (currentPage === 'reports') refreshReportData();
+    else if (currentPage === 'sales' || currentPage === 'daily-sales') loadSales();
+    else if (currentPage === 'deleted-sales') loadDeletedSales();
+    else loadProducts();
+  }
+
   window.addEventListener('online', async () => {
     isOnline = true;
+    updateConnectionStatusUI();
     appRealtimeChannel = null;
-    try { await refreshAllData(); } catch (_) {}
+    
     try { setupRealtimeListeners(); } catch (_) {}
-    if (currentPage === 'reports') {
-      try { refreshReportData(); } catch (_) {}
+    
+    // Only auto-refresh if user is not busy
+    if (!isUserBusy()) {
+        try { await refreshAllData(); } catch (_) {}
+        if (currentPage === 'reports') {
+            try { refreshReportData(); } catch (_) {}
+        }
+    } else {
+        pendingRemoteUpdate = true;
     }
+    
+    if (syncQueue.length > 0) processSyncQueue();
   });
   window.addEventListener('offline', () => {
     isOnline = false;
+    updateConnectionStatusUI();
   });
+
+  function updateConnectionStatusUI() {
+    const statusEl = document.getElementById('connection-status');
+    const statusText = document.getElementById('connection-status-text');
+    if (!statusEl || !statusText) return;
+    
+    if (isOnline) {
+      statusEl.classList.remove('offline');
+      statusEl.classList.add('online');
+      statusText.textContent = 'Online';
+    } else {
+      statusEl.classList.remove('online');
+      statusEl.classList.add('offline');
+      statusText.textContent = 'Offline';
+    }
+  }
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState === 'visible' && currentPage === 'reports') {
-      try { refreshReportData(); } catch (_) {}
+      // Only auto-refresh if user is not busy
+      if (!isUserBusy()) {
+        try { refreshReportData(); } catch (_) {}
+      }
     }
   });
   
@@ -346,7 +311,6 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
     PURCHASES: 'pagerrysmart_purchases',
     STOCK_ALERTS: 'pagerrysmart_stock_alerts',
     PROFIT_DATA: 'pagerrysmart_profit_data',
-    STOCK_MOVEMENTS: 'pagerrysmart_stock_movements',
     PRODUCTS_SYNC_TS: 'pagerrysmart_products_sync_ts',
     SALES_SYNC_TS: 'pagerrysmart_sales_sync_ts'
   };
@@ -396,7 +360,9 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
   const deletedSalesTableBody = document.getElementById('deleted-sales-table-body');
   const dailySalesTableBody = document.getElementById('daily-sales-table-body');
   const reportProductSalesBody = document.getElementById('report-product-sales-body');
-  const reportCategorySalesBody = document.getElementById('report-category-sales-body');
+  const reportStockReconBody = document.getElementById('report-stock-recon-body');
+    const reportNewProductsBody = document.getElementById('report-new-products-body');
+    const reportCategorySalesBody = document.getElementById('report-category-sales-body');
   const productModal = document.getElementById('product-modal');
   const receiptModal = document.getElementById('receipt-modal');
   const notification = document.getElementById('notification');
@@ -858,7 +824,14 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
   const DataModule = {
     async fetchSalesForRange(startIso, endIso) {
         try {
-            if (!isOnline) return sales;
+            if (!isOnline) {
+                const s = new Date(startIso);
+                const e = new Date(endIso);
+                return sales.filter(sale => {
+                    const d = new Date(sale.created_at);
+                    return d >= s && d <= e;
+                });
+            }
             const limit = PRODUCTS_PAGE_SIZE;
             let page = 0;
             const acc = [];
@@ -966,12 +939,7 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
                         }
                         return product;
                     });
-                    const pending = getPendingStockOverrides();
-                    normalizedProducts.forEach(p => {
-                        if (p && pending.has(p.id)) {
-                            p.stock = pending.get(p.id);
-                        }
-                    });
+                    applyPendingStockOverrides(normalizedProducts);
                     const activeProducts = normalizedProducts.filter(product => !product.deleted);
                     const localDeletedIds = new Set(products.filter(p => p && p.deleted).map(p => p.id));
                     const serverMap = new Map(activeProducts.map(p => [p.id, p]));
@@ -988,12 +956,7 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
                             merged.push(lp);
                         }
                     });
-                    const pending2 = getPendingStockOverrides();
-                    merged.forEach(p => {
-                        if (p && pending2.has(p.id)) {
-                            p.stock = pending2.get(p.id);
-                        }
-                    });
+                    applyPendingStockOverrides(merged);
                     if (offset === 0) {
                         products = merged;
                     } else {
@@ -1069,12 +1032,7 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
                     if (!data || data.length < limit) break;
                     offset += limit;
                 }
-                const pending = getPendingStockOverrides();
-                acc.forEach(p => {
-                    if (p && pending.has(p.id)) {
-                        p.stock = pending.get(p.id);
-                    }
-                });
+                applyPendingStockOverrides(acc);
                 const localDeletedIds = new Set(products.filter(p => p && p.deleted).map(p => p.id));
                 const serverMap = new Map(acc.map(p => [p.id, p]));
                 const merged = [];
@@ -1086,12 +1044,7 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
                 products.forEach(lp => {
                     if (!serverMap.has(lp.id) && !lp.deleted) merged.push(lp);
                 });
-                const pending2 = getPendingStockOverrides();
-                merged.forEach(p => {
-                    if (p && pending2.has(p.id)) {
-                        p.stock = pending2.get(p.id);
-                    }
-                });
+                applyPendingStockOverrides(merged);
                 products = merged;
                 dedupeProducts();
                 productsHasMore = false;
@@ -1158,6 +1111,7 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
                 if (products.length === 0) await DataModule.fetchAllProducts();
                 return products;
             }
+            applyPendingStockOverrides(updates);
             const byId = new Map(products.map(p => [p.id, p]));
             updates.forEach(u => {
                 const exist = byId.get(u.id);
@@ -1364,6 +1318,71 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
                 console.error('Error in fetchSales:', error);
                 showNotification('Error fetching sales: ' + error.message, 'error');
             }
+            return sales;
+        }
+    },
+
+    async fetchSalesSince(sinceTs) {
+        try {
+            if (!isOnline) return sales;
+            const limit = PRODUCTS_PAGE_SIZE;
+            let page = 0;
+            const updates = [];
+            const sinceTime = new Date(sinceTs || '1970-01-01T00:00:00.000Z').getTime();
+
+            while (true) {
+                let data, error;
+                try {
+                    ({ data, error } = await supabase
+                        .from('sales')
+                        .select('*')
+                        .order('created_at', { ascending: false })
+                        .range(page * limit, page * limit + limit - 1));
+                    if (error) throw error;
+                } catch (e) {
+                    console.warn('Error fetching sales page:', e);
+                    break;
+                }
+
+                if (!data || data.length === 0) break;
+
+                const batch = data
+                    .filter(s => !s.deleted && !s.deleted_at && !s.deletedAt)
+                    .map(sale => {
+                        if (!sale.receiptNumber && sale.receiptnumber) sale.receiptNumber = sale.receiptnumber;
+                        if (!sale.receiptNumber && !sale.receiptnumber) sale.receiptNumber = `UNKNOWN_${Date.now()}`;
+                        if (!sale.items) sale.items = [];
+                        if (typeof sale.total !== 'number') sale.total = parseFloat(sale.total) || 0;
+                        if (!sale.created_at) sale.created_at = new Date().toISOString();
+                        return sale;
+                    });
+
+                const filtered = batch.filter(s => {
+                    const updatedTime = s.updated_at ? new Date(s.updated_at).getTime() : 0;
+                    const createdTime = s.created_at ? new Date(s.created_at).getTime() : 0;
+                    return Math.max(updatedTime, createdTime) >= sinceTime;
+                });
+
+                updates.push(...filtered);
+
+                if (data.length < limit) break;
+                page++;
+            }
+
+            if (updates.length === 0) return sales;
+
+            sales = DataModule.mergeSalesData(updates);
+            try {
+                const maxTs = updates.reduce((m, s) => {
+                    const t = s && (s.updated_at || s.created_at) ? new Date(s.updated_at || s.created_at).toISOString() : null;
+                    return t && t > m ? t : m;
+                }, sinceTs || '1970-01-01T00:00:00.000Z');
+                lastSalesSyncTs = maxTs;
+            } catch (_) {}
+            saveToLocalStorage();
+            return sales;
+        } catch (e) {
+            console.error('Error in fetchSalesSince:', e);
             return sales;
         }
     },
@@ -1746,6 +1765,9 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
                 if (!product.id) {
                     product.id = 'temp_' + Date.now();
                 }
+                if (!product.created_at) {
+                    product.created_at = new Date().toISOString();
+                }
                 const key = productKeyNCP(product);
                 const existIdx = products.findIndex(p => productKeyNCP(p) === key);
                 if (existIdx >= 0) {
@@ -2001,6 +2023,14 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
                 ? { success: true, sale }
                 : this.saveSaleLocally(sale);
   
+            if (!isOnline) {
+                addToSyncQueue({
+                    type: 'saveSale',
+                    data: sale
+                });
+                return localResult;
+            }
+
             if (supabase && typeof supabase.from === 'function') {
                 try {
                     let validCashierId = await ensureValidUserId(currentUser?.id);
@@ -2339,31 +2369,34 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
         if (operation.synced) continue;
         
         try {
-            let success = false;
+            let syncResult = null;
             
             if (operation.type === 'saveSale') {
-                success = await syncSale(operation);
+                syncResult = await syncSale(operation);
             } else if (operation.type === 'saveProduct') {
-                success = await syncProduct(operation);
+                syncResult = await syncProduct(operation);
             } else if (operation.type === 'deleteProduct') {
-                success = await syncDeleteProduct(operation);
+                syncResult = await syncDeleteProduct(operation);
             } else if (operation.type === 'deleteSale') {
-                success = await syncDeleteSale(operation);
+                syncResult = await syncDeleteSale(operation);
             } else if (operation.type === 'saveExpense') {
-                success = await syncExpense(operation);
+                syncResult = await syncExpense(operation);
             } else if (operation.type === 'savePurchase') {
-                success = await syncPurchase(operation);
+                syncResult = await syncPurchase(operation);
             } else if (operation.type === 'deleteExpense') {
-                success = await syncDeleteExpense(operation);
+                syncResult = await syncDeleteExpense(operation);
             } else if (operation.type === 'deletePurchase') {
-                success = await syncDeletePurchase(operation);
-            } else if (operation.type === 'saveStockMovement') {
-                success = await syncStockMovement(operation);
+                syncResult = await syncDeletePurchase(operation);
             }
             
-            if (success) {
+            if (syncResult) {
                 operation.synced = true;
                 operation.syncedAt = new Date().toISOString();
+                
+                // If this was a product sync that returned a new ID, update other queued ops
+                if (operation.type === 'saveProduct' && typeof syncResult === 'string' && operation.data.id !== syncResult) {
+                    updateSyncQueueIds(operation.data.id, syncResult);
+                }
             }
         } catch (error) {
             console.error(`Error syncing operation:`, operation.type, error);
@@ -2387,7 +2420,12 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
             syncStatus.classList.add('show');
             syncStatusText.textContent = 'All data synced';
             setTimeout(() => syncStatus.classList.remove('show'), 3000);
-            await refreshAllData();
+            if (!isUserBusy()) {
+                await refreshAllData();
+            } else {
+                pendingPostSyncRefresh = true;
+                showNotification('Sync completed. Data will refresh when you are ready.', 'info');
+            }
         } else {
             syncStatus.classList.remove('syncing');
             syncStatus.classList.add('error');
@@ -2396,28 +2434,33 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
         }
     }
   }
-  
-  async function fetchStockMovements() {
-    if (!isOnline) return;
+
+  function updateSyncQueueIds(oldId, newId) {
+    if (!oldId || !newId || oldId === newId) return;
     
-    try {
-      const { data, error } = await supabase
-        .from('stock_movements')
-        .select('*')
-        .order('created_at', { ascending: false });
+    syncQueue.forEach(op => {
+      if (op.synced) return;
       
-      if (error) {
-        console.error('Error fetching stock movements:', error);
-        return;
+      // Update product ID in saveProduct data
+      if (op.type === 'saveProduct' && op.data && op.data.id === oldId) {
+        op.data.id = newId;
       }
       
-      // Update local stockMovements array
-      stockMovements = data || [];
-      localStorage.setItem(STORAGE_KEYS.STOCK_MOVEMENTS, JSON.stringify(stockMovements));
+      // Update product ID in deleteProduct data
+      if (op.type === 'deleteProduct' && op.id === oldId) {
+        op.id = newId;
+      }
       
-    } catch (error) {
-      console.error('Error in fetchStockMovements:', error);
-    }
+      // Update product IDs in saveSale items
+      if (op.type === 'saveSale' && op.data && Array.isArray(op.data.items)) {
+        op.data.items.forEach(item => {
+          if (item.id === oldId) item.id = newId;
+          if (item.productId === oldId) item.productId = newId;
+        });
+      }
+    });
+    
+    localStorage.setItem('syncQueue', JSON.stringify(syncQueue));
   }
   
   async function ensureValidUserId(userId) {
@@ -2688,7 +2731,7 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
                         }
                         dedupeProducts();
                         saveToLocalStorage();
-                        return true;
+                        return existId;
                     }
                 } catch (_) {}
   
@@ -2712,12 +2755,14 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
                 }
                 
         if (data && data.length > 0) {
+            const newId = data[0].id;
             const localProductIndex = products.findIndex(p => p.id === operation.data.id);
             if (localProductIndex !== -1) {
-                products[localProductIndex].id = data[0].id;
+                products[localProductIndex].id = newId;
             }
             dedupeProducts();
             saveToLocalStorage();
+            return newId;
         }
             }
         }
@@ -3045,33 +3090,6 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
         return false;
     }
   }
-  
-  async function syncStockMovement(operation) {
-    try {
-        const movementData = {
-            id: operation.data.id,
-            product_id: operation.data.productId,
-            product_name: operation.data.productName,
-            type: operation.data.type,
-            quantity: operation.data.quantity,
-            old_stock: operation.data.oldStock,
-            new_stock: operation.data.newStock,
-            reference: operation.data.reference,
-            created_at: operation.data.created_at,
-            cashier: operation.data.cashier
-        };
-        
-        const { error } = await supabase
-            .from('stock_movements')
-            .upsert(movementData, { onConflict: 'id' });
-            
-        if (error) throw error;
-        return true;
-    } catch (error) {
-        console.error('Error syncing stock movement:', error);
-        return false;
-    }
-  }
   function loadSyncQueue() {
     const savedQueue = localStorage.getItem('syncQueue');
     if (savedQueue) {
@@ -3167,14 +3185,19 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
         try {
             const p = payload && payload.new ? payload.new : null;
             if (!p) return;
+            applyPendingStockOverrides([p]);
             if (p.expirydate && !p.expiryDate) p.expiryDate = p.expirydate;
             const idx = products.findIndex(x => x.id === p.id);
             if (idx >= 0) products[idx] = { ...products[idx], ...p }; else products.push(p);
             dedupeProducts();
             try { const t = p.updated_at ? new Date(p.updated_at).toISOString() : null; if (t && t > lastProductsSyncTs) lastProductsSyncTs = t; } catch(_) {}
             saveToLocalStorage();
-            loadProducts();
-            if (currentPage === 'inventory') loadInventory(); else if (currentPage === 'stock') loadStockCheck();
+            if (!isUserBusy()) {
+                loadProducts();
+                if (currentPage === 'inventory') loadInventory(); else if (currentPage === 'stock') loadStockCheck();
+            } else {
+                pendingRemoteUpdate = true;
+            }
             checkAndGenerateAlerts();
         } catch (_) {}
     });
@@ -3182,13 +3205,18 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
         try {
             const p = payload && payload.new ? payload.new : null;
             if (!p) return;
+            applyPendingStockOverrides([p]);
             if (p.expirydate && !p.expiryDate) p.expiryDate = p.expirydate;
             const idx = products.findIndex(x => x.id === p.id);
             if (idx >= 0) products[idx] = { ...products[idx], ...p };
             dedupeProducts();
             try { const t = p.updated_at ? new Date(p.updated_at).toISOString() : null; if (t && t > lastProductsSyncTs) lastProductsSyncTs = t; } catch(_) {}
             saveToLocalStorage();
-            if (currentPage === 'inventory') loadInventory(); else if (currentPage === 'stock') loadStockCheck(); else if (currentPage === 'stock-history') renderStockHistory(); else loadProducts();
+            if (!isUserBusy()) {
+                if (currentPage === 'inventory') loadInventory(); else if (currentPage === 'stock') loadStockCheck(); else loadProducts();
+            } else {
+                pendingRemoteUpdate = true;
+            }
             checkAndGenerateAlerts();
         } catch (_) {}
     });
@@ -3198,7 +3226,11 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
             if (!p) return;
             products = products.filter(x => x.id !== p.id);
             saveToLocalStorage();
-            if (currentPage === 'inventory') loadInventory(); else if (currentPage === 'stock') loadStockCheck(); else if (currentPage === 'stock-history') renderStockHistory(); else loadProducts();
+            if (!isUserBusy()) {
+                if (currentPage === 'inventory') loadInventory(); else if (currentPage === 'stock') loadStockCheck(); else loadProducts();
+            } else {
+                pendingRemoteUpdate = true;
+            }
             checkAndGenerateAlerts();
         } catch (_) {}
     });
@@ -3213,10 +3245,7 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
                 sales.unshift(s);
                 try { const t = s.updated_at ? new Date(s.updated_at).toISOString() : null; if (t && t > lastSalesSyncTs) lastSalesSyncTs = t; } catch(_) {}
                 saveToLocalStorage();
-                loadSales();
-                if (currentPage === 'stock-history') {
-                    fetchStockMovements().then(() => renderStockHistory());
-                }
+                if (!isUserBusy()) loadSales(); else pendingRemoteUpdate = true;
             }
         } catch (_) {}
     });
@@ -3229,10 +3258,7 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
             if (idx >= 0) {
                 sales[idx] = { ...sales[idx], ...s };
                 saveToLocalStorage();
-                loadSales();
-                if (currentPage === 'stock-history') {
-                    fetchStockMovements().then(() => renderStockHistory());
-                }
+                if (!isUserBusy()) loadSales(); else pendingRemoteUpdate = true;
             }
         } catch (_) {}
     });
@@ -3243,10 +3269,7 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
             const rn = s.receiptnumber || s.receiptNumber;
             sales = sales.filter(x => x.receiptNumber !== rn);
             saveToLocalStorage();
-            loadSales();
-            if (currentPage === 'stock-history') {
-                fetchStockMovements().then(() => renderStockHistory());
-            }
+            if (!isUserBusy()) loadSales(); else pendingRemoteUpdate = true;
         } catch (_) {}
     });
   
@@ -3254,15 +3277,7 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
         DataModule.fetchDeletedSales().then(updatedDeletedSales => {
             deletedSales = updatedDeletedSales;
             saveToLocalStorage();
-            loadDeletedSales();
-        });
-    });
-  
-    channel.on('postgres_changes', { event: '*', schema: 'public', table: 'stock_movements' }, () => {
-        fetchStockMovements().then(() => {
-            if (currentPage === 'stock-history') {
-                renderStockHistory();
-            }
+            if (!isUserBusy()) loadDeletedSales(); else pendingRemoteUpdate = true;
         });
     });
   
@@ -3273,11 +3288,6 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
             if (currentPage === 'expenses') {
                 loadExpenses();
             }
-            try {
-                if (typeof window.updateAnalyticsSummary === 'function') {
-                    window.updateAnalyticsSummary();
-                }
-            } catch (_) {}
         });
     });
   
@@ -3288,11 +3298,6 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
             if (currentPage === 'purchases') {
                 loadPurchases();
             }
-            try {
-                if (typeof window.updateAnalyticsSummary === 'function') {
-                    window.updateAnalyticsSummary();
-                }
-            } catch (_) {}
         });
     });
     
@@ -3338,7 +3343,6 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
         purchases = [];
         stockAlerts = [];
         profitData = [];
-        stockMovements = [];
         
         // Load products
         const savedProducts = localStorage.getItem(STORAGE_KEYS.PRODUCTS);
@@ -3478,18 +3482,6 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
             }
         }
         
-        // Load stock movements
-        const savedStockMovements = localStorage.getItem(STORAGE_KEYS.STOCK_MOVEMENTS);
-        if (savedStockMovements) {
-            try {
-                stockMovements = JSON.parse(savedStockMovements);
-            } catch (parseError) {
-                console.error('Error parsing stock movements from localStorage:', parseError);
-                stockMovements = [];
-                try { localStorage.removeItem(STORAGE_KEYS.STOCK_MOVEMENTS); } catch (_) {}
-            }
-        }
-        
         try {
             const ts = localStorage.getItem(STORAGE_KEYS.PRODUCTS_SYNC_TS);
             if (ts) lastProductsSyncTs = ts;
@@ -3524,7 +3516,6 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
         localStorage.setItem(STORAGE_KEYS.PURCHASES, JSON.stringify(purchases));
         localStorage.setItem(STORAGE_KEYS.STOCK_ALERTS, JSON.stringify(stockAlerts));
         localStorage.setItem(STORAGE_KEYS.PROFIT_DATA, JSON.stringify(profitData));
-        localStorage.setItem(STORAGE_KEYS.STOCK_MOVEMENTS, JSON.stringify(stockMovements));
         localStorage.setItem(STORAGE_KEYS.PRODUCTS_SYNC_TS, String(lastProductsSyncTs || '1970-01-01T00:00:00.000Z'));
         localStorage.setItem(STORAGE_KEYS.SALES_SYNC_TS, String(lastSalesSyncTs || '1970-01-01T00:00:00.000Z'));
         
@@ -3623,36 +3614,51 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
   function dedupeProducts() {
     try {
       if (!Array.isArray(products)) return;
+      
       const result = [];
       const seenServerIds = new Set();
-      const serverSigs = new Set();
-      // Keep unique server-backed items first
+      const serverSigs = new Map(); // Map sig -> index in result
+      
+      // 1. Process real server products first
       for (let i = 0; i < products.length; i++) {
         const p = products[i];
-        if (!p) continue;
-        const id = p.id;
-        if (id && !String(id).startsWith('temp_')) {
-          const sig = productSignature(p);
-          if (serverSigs.has(sig)) continue;
+        if (!p || !p.id) continue;
+        
+        const id = String(p.id);
+        const isTemp = id.startsWith('temp_');
+        
+        if (!isTemp) {
           if (seenServerIds.has(id)) continue;
+          
+          const sig = productSignature(p);
+          // If we already have a product with this signature, prefer the one with a real ID
+          if (serverSigs.has(sig)) continue;
+          
           seenServerIds.add(id);
-          serverSigs.add(sig);
+          serverSigs.set(sig, result.length);
           result.push(p);
         }
       }
-      // Keep temp items when not exactly covered by a server item signature
+      
+      // 2. Process temp products, only keeping them if their signature isn't already in serverSigs
       const tempSigs = new Set();
       for (let i = 0; i < products.length; i++) {
         const p = products[i];
-        if (!p) continue;
-        const id = p.id;
-        if (id && !String(id).startsWith('temp_')) continue;
-        const sig = productSignature(p);
-        if (serverSigs.has(sig)) continue;
-        if (tempSigs.has(sig)) continue;
-        tempSigs.add(sig);
-        result.push(p);
+        if (!p || !p.id) continue;
+        
+        const id = String(p.id);
+        const isTemp = id.startsWith('temp_');
+        
+        if (isTemp) {
+          const sig = productSignature(p);
+          if (serverSigs.has(sig)) continue;
+          if (tempSigs.has(sig)) continue;
+          
+          tempSigs.add(sig);
+          result.push(p);
+        }
       }
+      
       products = result;
     } catch (e) {
       console.error('Error de-duplicating products:', e);
@@ -3793,8 +3799,17 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
                 ]);
                 const sRes = results[0];
                 const dRes = results[1];
-                if (sRes.status === 'fulfilled' && Array.isArray(sRes.value)) sales = sRes.value;
-                if (dRes.status === 'fulfilled' && Array.isArray(dRes.value)) deletedSales = dRes.value;
+                if (sRes.status === 'fulfilled' && Array.isArray(sRes.value)) {
+                    sales = DataModule.mergeSalesData(sRes.value);
+                }
+                if (dRes.status === 'fulfilled' && Array.isArray(dRes.value)) {
+                    const existingDeletedIds = new Set(deletedSales.map(s => s.id || s.receiptnumber));
+                    dRes.value.forEach(s => {
+                        if (!existingDeletedIds.has(s.id || s.receiptnumber)) {
+                            deletedSales.push(s);
+                        }
+                    });
+                }
                 saveToLocalStorage();
                 loadSales();
                 if (currentPage === 'reports') {
@@ -3993,7 +4008,6 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
         'inventory': 'Inventory Management',
         'reports': 'Sales Reports',
         'stock': 'Stock Check',
-        'stock-history': 'Stock History',
         'expenses': 'Expense Management',
         'purchases': 'Purchase Management',
         'analytics': 'Business Analytics',
@@ -4012,15 +4026,8 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
         loadInventory();
     } else if (pageName === 'reports') {
         loadReports();
-        try {
-            reportsAutoTimer = setInterval(() => {
-                try { refreshReportData(); } catch (_) {}
-            }, 15000);
-        } catch (_) {}
     } else if (pageName === 'stock') {
         loadStockCheck();
-    } else if (pageName === 'stock-history') {
-        loadStockHistory();
     } else if (pageName === 'account') {
         loadAccount();
     } else if (pageName === 'expenses') {
@@ -4029,6 +4036,11 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
         loadPurchases();
     } else if (pageName === 'analytics') {
         loadAnalytics();
+    }
+
+    if (pendingPostSyncRefresh && isOnline && !isUserBusy()) {
+        pendingPostSyncRefresh = false;
+        try { refreshAllData(); } catch (_) {}
     }
   }
   
@@ -4054,13 +4066,7 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
   
   // Product Functions
   function loadProducts() {
-    const pendingOverrides = getPendingStockOverrides();
-    const list = products.filter(p => !p.deleted).map(p => {
-        if (pendingOverrides.has(p.id)) {
-            return { ...p, stock: pendingOverrides.get(p.id) };
-        }
-        return p;
-    });
+    const list = products.filter(p => !p.deleted);
     if (list.length === 0) {
         productsGrid.innerHTML = `
             <div class="empty-state">
@@ -4123,13 +4129,7 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
     if (inventoryLoading) inventoryLoading.style.display = 'none';
     dedupeProducts();
     updateInventoryTotalFromAllProducts();
-    const pendingOverrides = getPendingStockOverrides();
-    const baseList = products.filter(p => !p.deleted).map(p => {
-        if (pendingOverrides.has(p.id)) {
-            return { ...p, stock: pendingOverrides.get(p.id) };
-        }
-        return p;
-    });
+    const baseList = products.filter(p => !p.deleted);
     const msPerDay = 1000 * 60 * 60 * 24;
     const todayTs = Date.now();
     let list;
@@ -4475,6 +4475,7 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
     if (productSearchEl) {
         productSearchEl.addEventListener('input', () => {
             renderProductSalesTable(currentProductSalesRows, productSearchEl.value);
+            renderStockReconTable(currentProductSalesRows, productSearchEl.value);
         });
     }
     const categorySearchEl = document.getElementById('report-category-search');
@@ -4515,19 +4516,28 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
     generateReport();
     const startIso = rangeStart ? rangeStart.toISOString() : '1970-01-01T00:00:00.000Z';
     const endIso = rangeEnd ? rangeEnd.toISOString() : new Date().toISOString();
-    Promise.allSettled([
-        DataModule.fetchSalesForRange(startIso, endIso),
-        DataModule.fetchDeletedSales()
-    ]).then(results => {
-        const sRes = results[0];
-        const dRes = results[1];
-        if (sRes.status === 'fulfilled' && Array.isArray(sRes.value)) sales = sRes.value;
-        if (dRes.status === 'fulfilled' && Array.isArray(dRes.value)) deletedSales = dRes.value;
-        updateSalesTables();
-        generateReport();
-    }).catch(() => {
-        generateReport();
-    });
+        Promise.allSettled([
+            DataModule.fetchSalesForRange(startIso, endIso),
+            DataModule.fetchDeletedSales()
+        ]).then(results => {
+            const sRes = results[0];
+            const dRes = results[1];
+            if (sRes.status === 'fulfilled' && Array.isArray(sRes.value)) {
+                sales = DataModule.mergeSalesData(sRes.value);
+            }
+            if (dRes.status === 'fulfilled' && Array.isArray(dRes.value)) {
+                const existingDeletedIds = new Set(deletedSales.map(s => s.id || s.receiptnumber));
+                dRes.value.forEach(s => {
+                    if (!existingDeletedIds.has(s.id || s.receiptnumber)) {
+                        deletedSales.push(s);
+                    }
+                });
+            }
+            updateSalesTables();
+            generateReport();
+        }).catch(() => {
+            generateReport();
+        });
   }
   
   function refreshReportData() {
@@ -4569,8 +4579,19 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
         ]).then(results => {
             const sRes = results[0];
             const dRes = results[1];
-            if (sRes.status === 'fulfilled' && Array.isArray(sRes.value)) sales = sRes.value;
-            if (dRes.status === 'fulfilled' && Array.isArray(dRes.value)) deletedSales = dRes.value;
+            if (sRes.status === 'fulfilled' && Array.isArray(sRes.value)) {
+                // Merge into local sales instead of overwriting
+                sales = DataModule.mergeSalesData(sRes.value);
+            }
+            if (dRes.status === 'fulfilled' && Array.isArray(dRes.value)) {
+                // Merge into local deletedSales instead of overwriting
+                const existingDeletedIds = new Set(deletedSales.map(s => s.id || s.receiptnumber));
+                dRes.value.forEach(s => {
+                    if (!existingDeletedIds.has(s.id || s.receiptnumber)) {
+                        deletedSales.push(s);
+                    }
+                });
+            }
             updateSalesTables();
             generateReport();
         }).catch(() => {
@@ -4869,7 +4890,7 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
                         existing.count += qty;
                         existing.amount += amt;
                     } else {
-                        productCountMap.set(pid || pname, { name: pname, count: qty, amount: amt });
+                        productCountMap.set(pid || pname, { id: pid, name: pname, count: qty, amount: amt });
                     }
                 }
                 let category = 'Uncategorized';
@@ -4886,9 +4907,19 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
         });
         currentProductSalesRows = Array.from(productCountMap.values()).sort((a, b) => b.count - a.count);
         currentCategorySalesRows = Array.from(categoryCountMap.entries()).map(([category, v]) => ({ category, count: v.count, amount: v.amount })).sort((a, b) => b.count - a.count);
+        
+        // Newly added products
+        const newProducts = products.filter(p => {
+            if (!p || !p.created_at || p.deleted) return false;
+            const d = new Date(p.created_at);
+            return d >= rangeStart && d <= rangeEnd;
+        }).sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+
         const productSearchEl2 = document.getElementById('report-product-search');
         const categorySearchEl2 = document.getElementById('report-category-search');
         renderProductSalesTable(currentProductSalesRows, productSearchEl2 ? productSearchEl2.value : '');
+        renderStockReconTable(currentProductSalesRows);
+        renderNewProductsTable(newProducts);
         renderCategorySalesTable(currentCategorySalesRows, categorySearchEl2 ? categorySearchEl2.value : '');
     } catch (error) {
         console.error('Error generating report:', error);
@@ -4903,23 +4934,85 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
     if (!list || list.length === 0) {
         reportProductSalesBody.innerHTML = `
             <tr>
-                <td colspan="3" style="text-align: center;">No product sales data</td>
+                <td colspan="4" style="text-align: center;">No product sales data</td>
             </tr>
         `;
         return;
     }
     const fragment = document.createDocumentFragment();
     reportProductSalesBody.innerHTML = '';
+    const productById = new Map(Array.isArray(products) ? products.map(p => [p.id, p]) : []);
     list.forEach(r => {
         const row = document.createElement('tr');
+        const p = productById.get(r.id);
+        const currentStock = p ? p.stock : '-';
         row.innerHTML = `
             <td>${r.name}</td>
             <td>${r.count}</td>
             <td>${formatCurrency(r.amount || 0)}</td>
+            <td>${currentStock}</td>
         `;
         fragment.appendChild(row);
     });
     reportProductSalesBody.appendChild(fragment);
+  }
+  
+  function renderStockReconTable(rows, query) {
+    if (!reportStockReconBody) return;
+    const q = (query || '').toString().trim().toLowerCase();
+    const list = q ? rows.filter(r => (r.name || '').toString().toLowerCase().includes(q)) : rows;
+    if (!list || list.length === 0) {
+        reportStockReconBody.innerHTML = `
+            <tr>
+                <td colspan="4" style="text-align: center;">No reconciliation data</td>
+            </tr>
+        `;
+        return;
+    }
+    const fragment = document.createDocumentFragment();
+    reportStockReconBody.innerHTML = '';
+    const productById = new Map(Array.isArray(products) ? products.map(p => [p.id, p]) : []);
+    list.forEach(r => {
+        const row = document.createElement('tr');
+        const p = productById.get(r.id);
+        const closingBalance = p ? p.stock : 0;
+        const deducted = r.count || 0;
+        const openingBalance = closingBalance + deducted;
+        row.innerHTML = `
+            <td>${r.name}</td>
+            <td>${openingBalance}</td>
+            <td>${deducted}</td>
+            <td>${closingBalance}</td>
+        `;
+        fragment.appendChild(row);
+    });
+    reportStockReconBody.appendChild(fragment);
+  }
+
+  function renderNewProductsTable(list) {
+    if (!reportNewProductsBody) return;
+    if (!list || list.length === 0) {
+        reportNewProductsBody.innerHTML = `
+            <tr>
+                <td colspan="4" style="text-align: center;">No new products in this period</td>
+            </tr>
+        `;
+        return;
+    }
+    const fragment = document.createDocumentFragment();
+    reportNewProductsBody.innerHTML = '';
+    list.forEach(p => {
+        const row = document.createElement('tr');
+        const dateStr = p.created_at ? new Date(p.created_at).toLocaleDateString() : '-';
+        row.innerHTML = `
+            <td>${p.name}</td>
+            <td>${p.category || '-'}</td>
+            <td>${formatCurrency(p.price || 0)}</td>
+            <td>${dateStr}</td>
+        `;
+        fragment.appendChild(row);
+    });
+    reportNewProductsBody.appendChild(fragment);
   }
   
   function renderCategorySalesTable(rows, query) {
@@ -5246,28 +5339,7 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
             for (const cartItem of cart) {
                 const product = products.find(p => p.id === cartItem.id);
                 if (product) {
-                    const oldStock = product.stock;
                     product.stock -= cartItem.quantity;
-                    
-                    // Record stock movement
-                    const movement = {
-                        id: 'movement_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9),
-                        productId: product.id,
-                        productName: product.name,
-                        type: 'sale',
-                        quantity: -cartItem.quantity, // Negative for reduction
-                        oldStock: oldStock,
-                        newStock: product.stock,
-                        reference: sale.receiptNumber,
-                        created_at: new Date().toISOString(),
-                        cashier: currentUser?.name || 'Unknown'
-                    };
-                    stockMovements.push(movement);
-                    
-                    addToSyncQueue({
-                        type: 'saveStockMovement',
-                        data: movement
-                    });
                     
                     addToSyncQueue({
                         type: 'saveProduct',
@@ -5290,9 +5362,6 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
                 updateInventoryTotalFromAllProducts();
                 loadInventory();
                 loadStockCheck();
-                if (currentPage === 'stock-history') {
-                    renderStockHistory();
-                }
             } catch (_) {}
             
             showReceipt(localResult.sale);
@@ -5493,10 +5562,6 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
             loadStockAlerts();
         }
         
-        if (currentPage === 'stock-history') {
-            renderStockHistory();
-        }
-        
         showNotification(productId ? 'Product updated successfully' : 'Product added successfully', 'success');
     }
   }
@@ -5545,10 +5610,6 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
         
         if (currentPage === 'analytics') {
             loadStockAlerts();
-        }
-        
-        if (currentPage === 'stock-history') {
-            renderStockHistory();
         }
         
         showNotification('Product deleted successfully', 'success');
@@ -5669,12 +5730,6 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
             newPurchases = purchases;
         }
         
-        try {
-            await fetchStockMovements();
-        } catch (error) {
-            console.error('Error fetching stock movements:', error);
-        }
-        
         products = newProducts;
         dedupeProducts();
         sales = newSales;
@@ -5690,9 +5745,6 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
         
         loadProducts();
         loadSales();
-        if (currentPage === 'stock-history') {
-            renderStockHistory();
-        }
         try { generateReport(); } catch (_) {}
         
         if (currentPage === 'inventory') {
@@ -5831,11 +5883,6 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
             closeExpenseModal();
             loadExpenses();
             showNotification('Expense saved successfully', 'success');
-            try {
-                if (typeof window.updateAnalyticsSummary === 'function') {
-                    window.updateAnalyticsSummary();
-                }
-            } catch (_) {}
         } else {
             showNotification('Failed to save expense. Please try again.', 'error');
         }
@@ -6160,11 +6207,6 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
             closePurchaseModal();
             loadPurchases();
             showNotification('Purchase saved successfully', 'success');
-            try {
-                if (typeof window.updateAnalyticsSummary === 'function') {
-                    window.updateAnalyticsSummary();
-                }
-            } catch (_) {}
         } else {
             showNotification('Failed to save purchase. Please try again.', 'error');
         }
@@ -6546,6 +6588,11 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
         loadProducts();
         return;
     }
+    
+    // Always show local results immediately
+    renderLocal();
+    
+    // If online, also fetch from server but merge/render instead of overwriting
     if (isOnline) {
         (async () => {
             try {
@@ -6563,28 +6610,42 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
                         if (p.expirydate && !p.expiryDate) p.expiryDate = p.expirydate;
                         return p;
                     }).filter(p => !p.deleted);
-                    products = normalized;
-                    productsOffset = normalized.length;
-                    productsHasMore = normalized.length === PRODUCTS_PAGE_SIZE;
-                    saveToLocalStorage();
-                    loadProducts();
+                    
+                    // Merge search results into local products array without duplicates
+                    const seenIds = new Set(products.map(p => p.id));
+                    let added = 0;
+                    normalized.forEach(p => {
+                        if (!seenIds.has(p.id)) {
+                            products.push(p);
+                            seenIds.add(p.id);
+                            added++;
+                        }
+                    });
+                    
+                    if (added > 0) {
+                        dedupeProducts();
+                        saveToLocalStorage();
+                    }
+                    
+                    // Render the filtered list (including the new results)
+                    renderLocal();
                     return;
                 }
             } catch (e) {
-                console.warn('Online search failed, falling back:', e);
+                console.warn('Online search failed:', e);
             }
-            renderLocal();
         })();
-    } else {
-        renderLocal();
     }
+    
     function renderLocal() {
         const filteredProducts = products.filter(product => {
-            const name = (product && product.name ? product.name : '').toLowerCase();
-            const category = (product && product.category ? product.category : '').toLowerCase();
-            const barcode = (product && typeof product.barcode === 'string') ? product.barcode.toLowerCase() : '';
+            if (!product || product.deleted) return false;
+            const name = (product.name || '').toLowerCase();
+            const category = (product.category || '').toLowerCase();
+            const barcode = (product.barcode || '').toString().toLowerCase();
             return name.includes(term) || category.includes(term) || barcode.includes(term);
         });
+        
         if (filteredProducts.length === 0) {
             productsGrid.innerHTML = `
                 <div class="empty-state">
@@ -6595,6 +6656,8 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
             `;
             return;
         }
+        
+        // Use the common render logic
         productsGrid.innerHTML = '';
         const chunkSize = 100;
         let index = 0;
@@ -6603,7 +6666,7 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
             const today = new Date();
             for (let i = 0; i < chunkSize && index < filteredProducts.length; i++, index++) {
                 const product = filteredProducts[index];
-                if (product.deleted) continue;
+                if (!product || product.deleted) continue;
                 const productCard = document.createElement('div');
                 productCard.className = 'product-card';
                 const expiryDate = new Date(product.expiryDate);
@@ -6713,72 +6776,81 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
     });
   }
   
-  // Stock History event listeners
-  const refreshStockHistoryBtn = document.getElementById('refresh-stock-history-btn');
-  const applyHistoryFiltersBtn = document.getElementById('apply-history-filters-btn');
-  const historySearchEl = document.getElementById('history-search');
-  
-  if (refreshStockHistoryBtn) {
-    refreshStockHistoryBtn.addEventListener('click', () => {
-        loadStockHistory();
-    });
-  }
-  
-  if (applyHistoryFiltersBtn) {
-    applyHistoryFiltersBtn.addEventListener('click', () => {
-        renderStockHistory();
-    });
-  }
-  
-  if (historySearchEl) {
-    const handler = debounce(() => {
-        renderStockHistory();
-    }, 150);
-    historySearchEl.addEventListener('input', handler);
-  }
-  
   // Inventory search
-  function applyInventorySearch(searchTerm) {
+  function applyInventorySearch(searchTerm, dateFilter) {
     const term = (searchTerm || '').toLowerCase();
-    if (!term) {
+    const day = (dateFilter || '').toString().trim();
+    if (!term && !day) {
         loadInventory();
         return;
     }
+    
+    // Always show local results immediately
+    renderLocal();
+    
+    // If online, also fetch from server but merge/render instead of overwriting
     if (isOnline) {
         (async () => {
             try {
                 let query = supabase
                     .from('products')
-                    .select('id,name,category,price,stock,expirydate,barcode,deleted')
-                    .or(`name.ilike.%${term}%,category.ilike.%${term}%`)
-                    .range(0, PRODUCTS_PAGE_SIZE - 1);
+                    .select('id,name,category,price,stock,expirydate,barcode,deleted,created_at');
+                
+                if (term) {
+                    query = query.or(`name.ilike.%${term}%,category.ilike.%${term}%`);
+                }
+                if (day) {
+                    query = query.gte('created_at', `${day}T00:00:00`).lte('created_at', `${day}T23:59:59`);
+                }
+                query = query.range(0, PRODUCTS_PAGE_SIZE - 1);
                 const { data, error } = await query;
                 if (!error && Array.isArray(data)) {
                     const filtered = data.map(p => {
                         if (p.expirydate && !p.expiryDate) p.expiryDate = p.expirydate;
                         return p;
                     }).filter(p => !p.deleted);
-                    renderInventoryList(filtered);
-                    const totalValue = filtered.reduce((sum, p) => sum + ((Number(p.price) || 0) * (Number(p.stock) || 0)), 0);
-                    const inventoryTotalValue = document.getElementById('inventory-total-value');
-                    if (inventoryTotalValue) inventoryTotalValue.textContent = formatCurrency(totalValue);
+                    
+                    // Merge search results into local products array without duplicates
+                    const seenIds = new Set(products.map(p => p.id));
+                    let added = 0;
+                    filtered.forEach(p => {
+                        if (!seenIds.has(p.id)) {
+                            products.push(p);
+                            seenIds.add(p.id);
+                            added++;
+                        }
+                    });
+                    
+                    if (added > 0) {
+                        dedupeProducts();
+                        saveToLocalStorage();
+                    }
+                    
+                    // Render the filtered list (including the new results)
+                    renderLocal();
                     return;
                 }
             } catch (e) {
-                console.warn('Online inventory search failed, falling back:', e);
+                console.warn('Online inventory search failed:', e);
             }
-            renderLocal();
         })();
-    } else {
-        renderLocal();
     }
+    
     function renderLocal() {
         const filteredProducts = products.filter(product => {
-            const name = (product && product.name ? product.name : '').toLowerCase();
-            const category = (product && product.category ? product.category : '').toLowerCase();
-            const idStr = (product && product.id != null) ? String(product.id).toLowerCase() : '';
-            return name.includes(term) || category.includes(term) || idStr.includes(term);
+            if (!product || product.deleted) return false;
+            const name = (product.name || '').toLowerCase();
+            const category = (product.category || '').toLowerCase();
+            const idStr = (product.id != null) ? String(product.id).toLowerCase() : '';
+            const matchesTerm = !term || name.includes(term) || category.includes(term) || idStr.includes(term);
+            if (!matchesTerm) return false;
+            
+            if (!day) return true;
+            if (!product.created_at) return false;
+            const productDay = String(product.created_at).split('T')[0];
+            return productDay === day;
         });
+        
         if (filteredProducts.length === 0) {
             inventoryTableBody.innerHTML = `
                 <tr>
@@ -6789,6 +6861,7 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
             if (inventoryTotalValue) inventoryTotalValue.textContent = formatCurrency(0);
             return;
         }
+        
         renderInventoryList(filteredProducts);
         const totalValue = filteredProducts.reduce((sum, p) => sum + ((Number(p.price) || 0) * (Number(p.stock) || 0)), 0);
         const inventoryTotalValue = document.getElementById('inventory-total-value');
@@ -6883,45 +6956,47 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
   }
   
   function updateInventoryTotalFromAllProducts() {
-    const pendingOverrides = getPendingStockOverrides();
-    const adjustedProducts = products
-        .filter(p => !p.deleted)
-        .map(p => {
-            if (pendingOverrides.has(p.id)) {
-                return { ...p, stock: pendingOverrides.get(p.id) };
-            }
-            return p;
-        });
-    
     const inventoryTotalValue = document.getElementById('inventory-total-value');
     if (inventoryTotalValue) {
-        const totalValue = adjustedProducts
+        const totalValue = products
+            .filter(p => !p.deleted)
             .reduce((sum, p) => sum + ((Number(p.price) || 0) * (Number(p.stock) || 0)), 0);
         inventoryTotalValue.textContent = formatCurrency(totalValue);
     }
     const inventoryTotalItems = document.getElementById('inventory-total-items');
     if (inventoryTotalItems) {
-        const totalUnits = adjustedProducts
+        const totalUnits = products
+            .filter(p => !p.deleted)
             .reduce((s, p) => s + (Number(p.stock) || 0), 0);
         inventoryTotalItems.textContent = String(totalUnits);
     }
   }
   
   const inventorySearchBtn = document.getElementById('inventory-search-btn');
+  const inventoryDateFilter = document.getElementById('inventory-date-filter');
+  const inventorySearchEl = document.getElementById('inventory-search');
+
   if (inventorySearchBtn) {
     inventorySearchBtn.addEventListener('click', () => {
-        const inventorySearchEl = document.getElementById('inventory-search');
         const searchTerm = inventorySearchEl ? inventorySearchEl.value : '';
-        applyInventorySearch(searchTerm);
+        const dateTerm = inventoryDateFilter ? inventoryDateFilter.value : '';
+        applyInventorySearch(searchTerm, dateTerm);
     });
   }
   
-  const inventorySearchEl = document.getElementById('inventory-search');
   if (inventorySearchEl) {
     const handler = debounce(() => {
-        applyInventorySearch(inventorySearchEl.value);
+        const dateTerm = inventoryDateFilter ? inventoryDateFilter.value : '';
+        applyInventorySearch(inventorySearchEl.value, dateTerm);
     }, 150);
     inventorySearchEl.addEventListener('input', handler);
+  }
+
+  if (inventoryDateFilter) {
+    inventoryDateFilter.addEventListener('change', () => {
+        const searchTerm = inventorySearchEl ? inventorySearchEl.value : '';
+        applyInventorySearch(searchTerm, inventoryDateFilter.value);
+    });
   }
   
   // Product buttons
@@ -7289,6 +7364,7 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
   async function init() {
     loadFromLocalStorage();
     loadSyncQueue();
+    updateConnectionStatusUI();
     validateDataStructure();
     cleanupDuplicateSales();
     validateSalesData();
@@ -7334,6 +7410,34 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
     if (isOnline) {
         checkSupabaseConnection();
     }
+
+    // Background sync so other-device updates appear without manual refresh/clearing storage
+    setInterval(async () => {
+        if (!isOnline || !currentUser) return;
+        const prevP = lastProductsSyncTs;
+        const prevS = lastSalesSyncTs;
+        lastProductsSyncTs = normalizeSyncTs(lastProductsSyncTs);
+        lastSalesSyncTs = normalizeSyncTs(lastSalesSyncTs);
+        try { await DataModule.fetchProductsSince(lastProductsSyncTs); } catch (_) {}
+        try { await DataModule.fetchSalesSince(lastSalesSyncTs); } catch (_) {}
+        const changed = lastProductsSyncTs !== prevP || lastSalesSyncTs !== prevS;
+        if (changed) {
+            if (!isUserBusy()) {
+                refreshVisibleData();
+            } else {
+                pendingRemoteUpdate = true;
+            }
+        }
+    }, 20000);
+
+    // Apply any queued UI refresh when the user is idle
+    setInterval(() => {
+        if (!pendingRemoteUpdate) return;
+        if (!isOnline || !currentUser) return;
+        if (isUserBusy()) return;
+        pendingRemoteUpdate = false;
+        refreshVisibleData();
+    }, 2000);
     
     // Infinite scroll for products
     window.addEventListener('scroll', () => {
@@ -7371,7 +7475,11 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
                         
                         // Refresh the current view if showing sales or deleted sales
                         if (currentPage === 'sales' || currentPage === 'deleted-sales') {
-                            loadSales();
+                            if (!isUserBusy()) {
+                                loadSales();
+                            } else {
+                                pendingRemoteUpdate = true;
+                            }
                         }
                     }
                 }
@@ -7381,6 +7489,30 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
         }
     }, 2 * 60 * 1000); // Check every 2 minutes
     
+    // Check for date rollover every minute to automatically refresh reports at midnight
+    let lastCheckedDay = new Date().toDateString();
+    setInterval(() => {
+        const today = new Date().toDateString();
+        if (today !== lastCheckedDay) {
+            // Only rollover if user is not busy
+            if (!isUserBusy()) {
+                lastCheckedDay = today;
+                const reportDateEl = document.getElementById('report-date');
+                if (reportDateEl) {
+                    const newDayStr = new Date().toISOString().split('T')[0];
+                    reportDateEl.value = newDayStr;
+                    if (currentPage === 'reports') {
+                        refreshReportData();
+                    }
+                }
+                // Also refresh sales lists if on those pages
+                if (currentPage === 'sales' || currentPage === 'daily-sales') {
+                    loadSales();
+                }
+            }
+        }
+    }, 60000); // Check every minute
+
     // Refresh session every 30 minutes
     setInterval(async () => {
         if (currentUser) {
@@ -7388,13 +7520,12 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
                 const { error } = await supabase.auth.refreshSession();
                 if (error) {
                     console.warn('Session refresh failed:', error);
-                    showNotification('Connection issue while refreshing session', 'info');
                 }
             } catch (e) {
                 console.warn('Session refresh exception:', e);
             }
         }
-    }, 30 * 60 * 1000);
+    }, 30 * 60 * 1000); // Check every 30 minutes
   }
   
   // Start app

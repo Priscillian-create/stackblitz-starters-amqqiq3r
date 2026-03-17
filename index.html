@@ -298,12 +298,6 @@
                         <span>Stock Check</span>
                     </a>
                 </li>
-                <li class="nav-item">
-                    <a href="#" class="nav-link" data-page="stock-history">
-                        <i class="fas fa-history"></i>
-                        <span>Stock History</span>
-                    </a>
-                </li>
                 <!-- NEW: Added navigation items for new features -->
                 <li class="nav-item">
                     <a href="#" class="nav-link" data-page="expenses">
@@ -338,6 +332,10 @@
             <div class="header">
                 <h2 id="page-title">Point of Sale</h2>
                 <div class="user-info">
+                    <div id="connection-status" class="connection-status online">
+                        <i class="fas fa-circle"></i>
+                        <span id="connection-status-text">Online</span>
+                    </div>
                     <div class="user-icon">
                         <i class="fas fa-user"></i>
                     </div>
@@ -429,6 +427,7 @@
                     
                     <div class="search-bar">
                         <input type="text" id="inventory-search" name="inventory-search" placeholder="Search inventory...">
+                        <input type="date" id="inventory-date-filter" title="Filter by date added" style="margin-left: 10px; width: auto; min-width: 150px; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
                         <button id="inventory-search-btn"><i class="fas fa-search"></i></button>
                     </div>
                     
@@ -566,11 +565,50 @@
                                     <th>Product</th>
                                     <th>Items Sold</th>
                                     <th>Amount</th>
+                                    <th>Current Stock</th>
                                 </tr>
                             </thead>
                             <tbody id="report-product-sales-body">
                                 <tr>
-                                    <td colspan="3" style="text-align: center;">No product sales data</td>
+                                    <td colspan="4" style="text-align: center;">No product sales data</td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+
+                    <div class="report-section">
+                        <h3>Stock Reconciliation</h3>
+                        <table class="inventory-table">
+                            <thead>
+                                <tr>
+                                    <th>Product</th>
+                                    <th>Opening Balance</th>
+                                    <th>Sold Today</th>
+                                    <th>Closing Balance</th>
+                                </tr>
+                            </thead>
+                            <tbody id="report-stock-recon-body">
+                                <tr>
+                                    <td colspan="4" style="text-align: center;">No reconciliation data</td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+
+                    <div class="report-section">
+                        <h3>Newly Added Products</h3>
+                        <table class="inventory-table">
+                            <thead>
+                                <tr>
+                                    <th>Product</th>
+                                    <th>Category</th>
+                                    <th>Price</th>
+                                    <th>Date Added</th>
+                                </tr>
+                            </thead>
+                            <tbody id="report-new-products-body">
+                                <tr>
+                                    <td colspan="4" style="text-align: center;">No new products in this period</td>
                                 </tr>
                             </tbody>
                         </table>
@@ -746,71 +784,6 @@
                         <div class="table-footer">
                             <small>Last updated: <span id="stock-last-updated">-</span></small>
                         </div>
-                    </div>
-                </div>
-            </div>
-            
-            <!-- Stock History Page -->
-            <div id="stock-history-page" class="page-content" style="display: none;">
-                <div class="inventory-container">
-                    <div class="inventory-header">
-                        <h3>Stock History</h3>
-                        <div class="page-actions">
-                            <button class="btn btn-outline" id="refresh-stock-history-btn"><i class="fas fa-sync"></i> Refresh</button>
-                        </div>
-                    </div>
-                    <div class="filters-section">
-                        <div class="filter-group">
-                            <label for="history-product-filter">Product:</label>
-                            <select id="history-product-filter">
-                                <option value="">All Products</option>
-                            </select>
-                        </div>
-                        <div class="filter-group">
-                            <label for="history-date-from">From:</label>
-                            <input type="date" id="history-date-from">
-                        </div>
-                        <div class="filter-group">
-                            <label for="history-date-to">To:</label>
-                            <input type="date" id="history-date-to">
-                        </div>
-                        <div class="filter-group">
-                            <label for="history-type-filter">Type:</label>
-                            <select id="history-type-filter">
-                                <option value="">All Types</option>
-                                <option value="sale">Sales</option>
-                                <option value="purchase">Purchases</option>
-                                <option value="adjustment">Adjustments</option>
-                            </select>
-                        </div>
-                        <button class="btn btn-primary" id="apply-history-filters-btn">Apply Filters</button>
-                    </div>
-                    <div class="table-container">
-                        <div class="table-header">
-                            <h3>Stock Movement History</h3>
-                            <div class="table-actions">
-                                <input type="text" id="history-search" name="history-search" placeholder="Search history...">
-                            </div>
-                        </div>
-                        <table class="data-table">
-                            <thead>
-                                <tr>
-                                    <th>Date</th>
-                                    <th>Product</th>
-                                    <th>Type</th>
-                                    <th>Quantity</th>
-                                    <th>Stock Before</th>
-                                    <th>Stock After</th>
-                                    <th>Reference</th>
-                                    <th>Cashier</th>
-                                </tr>
-                            </thead>
-                            <tbody id="stock-history-table-body">
-                                <tr>
-                                    <td colspan="8" style="text-align: center;">No stock movements found</td>
-                                </tr>
-                            </tbody>
-                        </table>
                     </div>
                 </div>
             </div>

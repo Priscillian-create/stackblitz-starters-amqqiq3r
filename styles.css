@@ -106,9 +106,11 @@ body {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  margin-bottom: 30px;
-  padding-bottom: 15px;
-  border-bottom: 1px solid #ddd;
+  padding: 10px 20px;
+  background-color: white;
+  box-shadow: 0 2px 5px rgba(0, 0, 0, 0.1);
+  margin-bottom: 20px;
+  border-radius: 8px;
 }
 
 .header h2 {
@@ -119,6 +121,33 @@ body {
 .user-info {
   display: flex;
   align-items: center;
+  gap: 15px;
+}
+
+.connection-status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.85rem;
+  padding: 4px 12px;
+  border-radius: 20px;
+  background: #f1f3f4;
+  font-weight: 500;
+  transition: all 0.3s ease;
+}
+
+.connection-status i {
+  font-size: 8px;
+}
+
+.connection-status.online {
+  color: var(--success-color);
+  background: #e8f5e9;
+}
+
+.connection-status.offline {
+  color: var(--warning-color);
+  background: #fff3e0;
 }
 
 .user-info .user-icon {
