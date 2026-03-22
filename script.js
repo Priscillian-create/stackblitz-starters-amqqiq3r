@@ -238,6 +238,93 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
     else loadProducts();
   }
 
+  function reconcileMissingStockReductions(daysBack) {
+    try {
+      const windowDays = Number(daysBack);
+      const cutoff = Date.now() - (isFinite(windowDays) ? windowDays : 7) * 24 * 60 * 60 * 1000;
+      const appliedKey = 'pagerrysmart_stock_applied_receipts';
+      let applied = new Set();
+      try {
+        const raw = localStorage.getItem(appliedKey);
+        if (raw) {
+          const arr = JSON.parse(raw);
+          if (Array.isArray(arr)) applied = new Set(arr.map(String));
+        }
+      } catch (_) {}
+
+      const deletedReceipts = new Set();
+      try {
+        (deletedSales || []).forEach(s => {
+          const rn = s && (s.receiptNumber || s.receiptnumber);
+          if (rn) deletedReceipts.add(String(rn));
+        });
+      } catch (_) {}
+
+      let changed = false;
+      let appliedCount = 0;
+
+      (sales || []).forEach(sale => {
+        if (!sale) return;
+        if (sale.deleted || sale.deleted_at || sale.deletedAt) return;
+        const rn = sale.receiptNumber || sale.receiptnumber;
+        if (!rn) return;
+        const rns = String(rn);
+        if (deletedReceipts.has(rns)) return;
+        if (applied.has(rns)) return;
+
+        const saleTs = sale.created_at ? Date.parse(sale.created_at) : NaN;
+        if (!isFinite(saleTs) || saleTs < cutoff) {
+          applied.add(rns);
+          return;
+        }
+
+        const idStr = sale.id ? String(sale.id) : '';
+        const isLocalOrigin = !!sale.clientSaleId || idStr.startsWith('temp_');
+        if (!isLocalOrigin) return;
+        if (!Array.isArray(sale.items) || sale.items.length === 0) return;
+
+        sale.items.forEach(item => {
+          if (!item) return;
+          const pid = item.id != null ? String(item.id) : (item.productId != null ? String(item.productId) : '');
+          if (!pid) return;
+          const qty = Number(item.quantity);
+          const safeQty = isFinite(qty) ? qty : 0;
+          if (safeQty <= 0) return;
+          const p = products.find(x => x && String(x.id) === pid);
+          if (!p) return;
+          const currentStock = Number(p.stock);
+          const safeCurrent = isFinite(currentStock) ? currentStock : 0;
+          const newStock = Math.max(0, safeCurrent - safeQty);
+          if (newStock !== safeCurrent) {
+            p.stock = newStock;
+            addToSyncQueue({
+              type: 'saveProduct',
+              data: { id: p.id, stock: p.stock }
+            });
+            changed = true;
+          }
+        });
+
+        applied.add(rns);
+        appliedCount++;
+      });
+
+      if (changed) {
+        saveToLocalStorage();
+        try { checkAndGenerateAlerts(); } catch (_) {}
+        if (!isUserBusy()) {
+          try { refreshVisibleData(); } catch (_) {}
+        }
+      }
+      try {
+        localStorage.setItem(appliedKey, JSON.stringify(Array.from(applied)));
+      } catch (_) {}
+      return { changed, appliedCount };
+    } catch (_) {
+      return { changed: false, appliedCount: 0 };
+    }
+  }
+
   window.addEventListener('online', async () => {
     isOnline = true;
     updateConnectionStatusUI();
@@ -7400,6 +7487,7 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
     validateSalesData();
     cleanupSyncQueue();
     recoverUnsyncedLocalSales();
+    try { reconcileMissingStockReductions(14); } catch (_) {}
     
     // Check for stock alerts on initialization
     checkAndGenerateAlerts();
