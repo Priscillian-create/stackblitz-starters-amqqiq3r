@@ -197,6 +197,8 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
   let currentPage = "pos", isOnline = navigator.onLine, syncQueue = [];
   let pendingPostSyncRefresh = false;
   let pendingRemoteUpdate = false;
+  let posSearchSeq = 0;
+  let currentPosSearchTerm = '';
   let connectionRetryCount = 0;
   const MAX_RETRY_ATTEMPTS = 3, RETRY_DELAY = 5000;
   
@@ -2649,17 +2651,24 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
   async function syncProduct(operation) {
     try {
         if (operation.data.stock !== undefined && !operation.data.name) {
+            const pid = operation && operation.data ? operation.data.id : null;
+            if (!pid) return false;
+            if (String(pid).startsWith('temp_')) {
+                return false;
+            }
             try {
-                const { error } = await supabase
+                const { data, error } = await supabase
                     .from('products')
                     .update({ stock: operation.data.stock })
-                    .eq('id', operation.data.id);
+                    .eq('id', pid)
+                    .select('id');
                 if (error) {
                     if (error.code === '42703' && /updated_at/i.test(error.message || '')) {
                         return true;
                     }
                     throw error;
                 }
+                if (!data || (Array.isArray(data) && data.length === 0)) return false;
             } catch (e) {
                 if (e && e.code === '42703' && /updated_at/i.test(e.message || '')) {
                     return true;
@@ -2678,16 +2687,18 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
                 };
                 
                 try {
-                    const { error } = await supabase
+                    const { data, error } = await supabase
                         .from('products')
                         .update(productToSave)
-                        .eq('id', operation.data.id);
+                        .eq('id', operation.data.id)
+                        .select('id');
                     if (error) {
                         if (error.code === '42703' && /updated_at/i.test(error.message || '')) {
                             return true;
                         }
                         throw error;
                     }
+                    if (!data || (Array.isArray(data) && data.length === 0)) return false;
                 } catch (e) {
                     if (e && e.code === '42703' && /updated_at/i.test(e.message || '')) {
                         return true;
@@ -4066,6 +4077,14 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
   
   // Product Functions
   function loadProducts() {
+    try {
+        const searchEl = document.getElementById('product-search');
+        const term = searchEl ? (searchEl.value || '').toString().trim() : '';
+        if (term) {
+            applyProductSearch(term);
+            return;
+        }
+    } catch (_) {}
     const list = products.filter(p => !p.deleted);
     if (list.length === 0) {
         productsGrid.innerHTML = `
@@ -5337,9 +5356,13 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
         
         if (localResult.success) {
             for (const cartItem of cart) {
-                const product = products.find(p => p.id === cartItem.id);
+                const product = products.find(p => String(p.id) === String(cartItem.id));
                 if (product) {
-                    product.stock -= cartItem.quantity;
+                    const currentStock = Number(product.stock);
+                    const qty = Number(cartItem.quantity);
+                    const safeCurrent = isFinite(currentStock) ? currentStock : 0;
+                    const safeQty = isFinite(qty) ? qty : 0;
+                    product.stock = Math.max(0, safeCurrent - safeQty);
                     
                     addToSyncQueue({
                         type: 'saveProduct',
@@ -6584,6 +6607,8 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
   // Product search
   function applyProductSearch(searchTerm) {
     const term = (searchTerm || '').toLowerCase();
+    currentPosSearchTerm = term;
+    const mySeq = ++posSearchSeq;
     if (!term) {
         loadProducts();
         return;
@@ -6638,6 +6663,7 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
     }
     
     function renderLocal() {
+        if (mySeq !== posSearchSeq) return;
         const filteredProducts = products.filter(product => {
             if (!product || product.deleted) return false;
             const name = (product.name || '').toLowerCase();
@@ -6647,6 +6673,7 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
         });
         
         if (filteredProducts.length === 0) {
+            if (mySeq !== posSearchSeq) return;
             productsGrid.innerHTML = `
                 <div class="empty-state">
                     <i class="fas fa-search"></i>
@@ -6658,10 +6685,12 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
         }
         
         // Use the common render logic
+        if (mySeq !== posSearchSeq) return;
         productsGrid.innerHTML = '';
         const chunkSize = 100;
         let index = 0;
         function renderChunk() {
+            if (mySeq !== posSearchSeq) return;
             const fragment = document.createDocumentFragment();
             const today = new Date();
             for (let i = 0; i < chunkSize && index < filteredProducts.length; i++, index++) {
@@ -6698,6 +6727,7 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
                 productCard.addEventListener('click', () => addToCart(product));
                 fragment.appendChild(productCard);
             }
+            if (mySeq !== posSearchSeq) return;
             productsGrid.appendChild(fragment);
             if (index < filteredProducts.length) {
                 setTimeout(renderChunk, 0);
