@@ -1197,10 +1197,10 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
         }
     },
     
-    async fetchProductsSince(sinceTs) {
+    async fetchProductsSince(sinceTs, force = false) {
         try {
             if (!isOnline) return products;
-            if (!shouldFetch(lastProductsFetchAt)) return products;
+            if (!force && !shouldFetch(lastProductsFetchAt)) return products;
             const limit = PRODUCTS_PAGE_SIZE;
             let page = 0;
             const updates = [];
@@ -7606,7 +7606,7 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
         const prevS = lastSalesSyncTs;
         lastProductsSyncTs = normalizeSyncTs(lastProductsSyncTs);
         lastSalesSyncTs = normalizeSyncTs(lastSalesSyncTs);
-        try { await DataModule.fetchProductsSince(lastProductsSyncTs); } catch (_) {}
+        try { await DataModule.fetchProductsSince(lastProductsSyncTs, true); } catch (_) {}
         try { await DataModule.fetchSalesSince(lastSalesSyncTs); } catch (_) {}
         const changed = lastProductsSyncTs !== prevP || lastSalesSyncTs !== prevS;
         if (changed) {
