@@ -141,8 +141,8 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
   }
   
   // Supabase initialization
-  const supabaseUrl = 'https://ieriphdzlbuzqqwrymwn.supabase.co';
-  const supabaseKey = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImllcmlwaGR6bGJ1enFxd3J5bXduIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjIzMDU1MTgsImV4cCI6MjA3Nzg4MTUxOH0.bvbs6joSxf1u9U8SlaAYmjve-N6ArNYcNMtnG6-N_HU';
+  const supabaseUrl = 'https://qthmeubpfhbefkfcqpup.supabase.co';
+  const supabaseKey = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InF0aG1ldWJwZmhiZWZrZmNxcHVwIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzQ0ODQxNDUsImV4cCI6MjA5MDA2MDE0NX0.ytZKWiX0hy3w2UN8e2_UCdDNA0aYzyi1jiKEcqLrDWM';
   function sanitize(v) {
     return String(v || '').replace(/[`'"]/g, '').trim();
   }
@@ -201,6 +201,15 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
   let currentPosSearchTerm = '';
   let connectionRetryCount = 0;
   const MAX_RETRY_ATTEMPTS = 3, RETRY_DELAY = 5000;
+  const FETCH_COOLDOWN_MS = Number(getCfg('fetchCooldownMs', '300000')) || 300000;
+  let lastProductsFetchAt = 0;
+  let lastSalesFetchAt = 0;
+  let lastUsersFetchAt = 0;
+  let lastConnectionCheckAt = 0;
+  let lastReportsRefreshAt = 0;
+  function shouldFetch(ts, cd = FETCH_COOLDOWN_MS) {
+    return Date.now() - ts > cd;
+  }
   
   // New global variables for extended features
   let expenses = [], purchases = [], stockAlerts = [], profitData = [];
@@ -580,6 +589,10 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
   
   // Connection management
   function checkSupabaseConnection() {
+    if (Date.now() - lastConnectionCheckAt < 60000) {
+        return;
+    }
+    lastConnectionCheckAt = Date.now();
     if (!isOnline) {
         updateConnectionStatus('offline', 'Offline');
         return;
@@ -730,23 +743,32 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
         const loginSubmitBtn = document.getElementById('login-submit-btn');
         loginSubmitBtn.classList.add('loading');
         loginSubmitBtn.disabled = true;
+        const loginErrorEl = document.getElementById('login-error');
+        if (loginErrorEl) loginErrorEl.style.display = 'none';
         
         try {
             const { data, error } = await supabase.auth.signInWithPassword({ email, password });
             
             if (error) {
-                // Provide specific error messages for common login issues
-                if (error.message.includes('Invalid login credentials') || error.message.includes('invalid_credentials')) {
-                    showNotification('❌ Invalid username or password. Please try again.', 'error');
-                    console.error('Login error:', error);
-                    return { success: false, error: 'Invalid credentials' };
-                } else if (error.message.includes('Email not confirmed')) {
+                const msg = (error.message || '').toLowerCase();
+                if (msg.includes('email not confirmed')) {
                     showNotification('⚠️ Please confirm your email before logging in.', 'warning');
                     return { success: false, error: 'Email not confirmed' };
-                } else {
-                    showNotification('❌ ' + (error.message || 'Login failed'), 'error');
-                    return { success: false, error: error.message };
                 }
+                if (msg.includes('invalid') || msg.includes('invalid login') || msg.includes('invalid credentials') || msg.includes('invalid email or password') || msg.includes('invalid_grant')) {
+                    showNotification('❌ Email or password is not correct.', 'error');
+                    if (loginErrorEl) {
+                        loginErrorEl.textContent = 'Invalid email or password. Please try again.';
+                        loginErrorEl.style.display = 'block';
+                    }
+                    return { success: false, error: 'Invalid credentials' };
+                }
+                showNotification('❌ Email or password is not correct.', 'error');
+                if (loginErrorEl) {
+                    loginErrorEl.textContent = 'Invalid email or password. Please try again.';
+                    loginErrorEl.style.display = 'block';
+                }
+                return { success: false, error: error.message };
             }
             
             let savedRole = null;
@@ -798,6 +820,7 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
             }
             
             localStorage.setItem(STORAGE_KEYS.CURRENT_USER, JSON.stringify(currentUser));
+            if (loginErrorEl) loginErrorEl.style.display = 'none';
             showApp();
             showNotification('✅ Login successful!', 'success');
             if (isOnline && syncQueue.length > 0) {
@@ -809,6 +832,10 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
         } catch (error) {
             console.error('Signin error:', error);
             showNotification('❌ ' + (error.message || 'Login failed'), 'error');
+            if (loginErrorEl) {
+                loginErrorEl.textContent = 'Invalid email or password. Please try again.';
+                loginErrorEl.style.display = 'block';
+            }
             return { success: false, error: error.message };
         } finally {
             loginSubmitBtn.classList.remove('loading');
@@ -913,7 +940,7 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
   const DataModule = {
     async fetchSalesForRange(startIso, endIso) {
         try {
-            if (!isOnline) {
+            if (!isOnline || (!shouldFetch(lastSalesFetchAt) && sales.length > 0)) {
                 const s = new Date(startIso);
                 const e = new Date(endIso);
                 return sales.filter(sale => {
@@ -980,6 +1007,7 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
                 }).filter(s => !s.deleted && !s.deleted_at && !s.deletedAt);
                 sales = DataModule.mergeSalesData(normalized);
                 saveToLocalStorage();
+                lastSalesFetchAt = Date.now();
             }
             return sales;
         } catch (_) {
@@ -989,10 +1017,14 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
     async fetchUsers() {
         try {
             if (isOnline && AuthModule.isAdmin()) {
+                if (!shouldFetch(lastUsersFetchAt) && Array.isArray(users) && users.length > 0) {
+                    return users;
+                }
                 const { data, error } = await supabase.from('users').select('*').order('created_at', { ascending: false });
                 if (error) throw error;
                 users = Array.isArray(data) ? data : [];
                 saveToLocalStorage();
+                lastUsersFetchAt = Date.now();
                 return users;
             }
             return users;
@@ -1005,6 +1037,9 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
     async fetchProducts(offset = 0, limit = PRODUCTS_PAGE_SIZE) {
         try {
             if (isOnline) {
+                if (!shouldFetch(lastProductsFetchAt) && products.length > 0 && offset === 0) {
+                    return products;
+                }
                 let query = supabase
                     .from('products')
                     .select('id,name,category,price,stock,expirydate,barcode,deleted')
@@ -1061,6 +1096,7 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
                     productsHasMore = activeProducts.length === limit;
                     productsOffset = offset + activeProducts.length;
                     saveToLocalStorage();
+                    lastProductsFetchAt = Date.now();
                     return products;
                 }
             }
@@ -1081,6 +1117,9 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
     async fetchAllProducts() {
         try {
             if (isOnline) {
+                if (!shouldFetch(lastProductsFetchAt) && products.length > 0) {
+                    return products;
+                }
                 const acc = [];
                 let offset = 0;
                 const limit = PRODUCTS_PAGE_SIZE;
@@ -1148,6 +1187,7 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
                     } catch (_) {}
                 }
                 saveToLocalStorage();
+                lastProductsFetchAt = Date.now();
                 return products;
             }
             return products;
@@ -1160,6 +1200,7 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
     async fetchProductsSince(sinceTs) {
         try {
             if (!isOnline) return products;
+            if (!shouldFetch(lastProductsFetchAt)) return products;
             const limit = PRODUCTS_PAGE_SIZE;
             let page = 0;
             const updates = [];
@@ -1219,6 +1260,7 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
                 lastProductsSyncTs = maxTs;
             } catch (_) {}
             saveToLocalStorage();
+            lastProductsFetchAt = Date.now();
             return products;
         } catch (e) {
             console.error('Error in fetchProductsSince:', e);
@@ -1265,6 +1307,9 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
     async fetchSales() {
         try {
             if (isOnline) {
+                if (!shouldFetch(lastSalesFetchAt) && sales.length > 0) {
+                    return sales;
+                }
                 const timeoutPromise = new Promise((_, reject) => 
                     setTimeout(() => reject(new Error('Request timeout')), 15000)
                 );
@@ -1392,6 +1437,7 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
                     });
                     sales = mergedSales;
                     saveToLocalStorage();
+                    lastSalesFetchAt = Date.now();
                     return sales;
                 }
             }
@@ -1414,6 +1460,7 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
     async fetchSalesSince(sinceTs) {
         try {
             if (!isOnline) return sales;
+            if (!shouldFetch(lastSalesFetchAt)) return sales;
             const limit = PRODUCTS_PAGE_SIZE;
             let page = 0;
             const updates = [];
@@ -1469,6 +1516,7 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
                 lastSalesSyncTs = maxTs;
             } catch (_) {}
             saveToLocalStorage();
+            lastSalesFetchAt = Date.now();
             return sales;
         } catch (e) {
             console.error('Error in fetchSalesSince:', e);
@@ -4648,6 +4696,10 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
   
   function refreshReportData() {
     try {
+        if (!shouldFetch(lastReportsRefreshAt)) {
+            generateReport();
+            return;
+        }
         const reportsLoading = document.getElementById('reports-loading');
         if (reportsLoading) reportsLoading.style.display = 'none';
         isReportsLoading = false;
@@ -4703,6 +4755,7 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
         }).catch(() => {
             generateReport();
         });
+        lastReportsRefreshAt = Date.now();
     } catch (_) {
         const reportsLoading = document.getElementById('reports-loading');
         if (reportsLoading) reportsLoading.style.display = 'none';
@@ -6593,9 +6646,26 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
     e.preventDefault();
     const email = document.getElementById('login-email').value;
     const password = document.getElementById('login-password').value;
+    const loginErrorEl = document.getElementById('login-error');
+    if (loginErrorEl) loginErrorEl.style.display = 'none';
     
     AuthModule.signIn(email, password);
   });
+  
+  const loginEmailInput = document.getElementById('login-email');
+  const loginPasswordInput = document.getElementById('login-password');
+  if (loginEmailInput) {
+    loginEmailInput.addEventListener('input', () => {
+        const el = document.getElementById('login-error');
+        if (el) el.style.display = 'none';
+    });
+  }
+  if (loginPasswordInput) {
+    loginPasswordInput.addEventListener('input', () => {
+        const el = document.getElementById('login-error');
+        if (el) el.style.display = 'none';
+    });
+  }
   
   registerForm.addEventListener('submit', (e) => {
     e.preventDefault();
