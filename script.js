@@ -345,7 +345,7 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
     if (!isUserBusy()) {
         try { await refreshAllData(); } catch (_) {}
         if (currentPage === 'reports') {
-            try { refreshReportData(); } catch (_) {}
+            try { refreshReportData(true); } catch (_) {}
         }
     } else {
         pendingRemoteUpdate = true;
@@ -377,7 +377,7 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
     if (document.visibilityState === 'visible' && currentPage === 'reports') {
       // Only auto-refresh if user is not busy
       if (!isUserBusy()) {
-        try { refreshReportData(); } catch (_) {}
+        try { refreshReportData(true); } catch (_) {}
       }
     }
   });
@@ -938,9 +938,9 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
   
   // Data Module
   const DataModule = {
-    async fetchSalesForRange(startIso, endIso) {
+    async fetchSalesForRange(startIso, endIso, force = false) {
         try {
-            if (!isOnline || (!shouldFetch(lastSalesFetchAt) && sales.length > 0)) {
+            if (!isOnline || (!force && !shouldFetch(lastSalesFetchAt) && sales.length > 0)) {
                 const s = new Date(startIso);
                 const e = new Date(endIso);
                 return sales.filter(sale => {
@@ -1457,10 +1457,10 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
         }
     },
 
-    async fetchSalesSince(sinceTs) {
+    async fetchSalesSince(sinceTs, force = false) {
         try {
             if (!isOnline) return sales;
-            if (!shouldFetch(lastSalesFetchAt)) return sales;
+            if (!force && !shouldFetch(lastSalesFetchAt)) return sales;
             const limit = PRODUCTS_PAGE_SIZE;
             let page = 0;
             const updates = [];
@@ -3391,7 +3391,14 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
                 sales.unshift(s);
                 try { const t = s.updated_at ? new Date(s.updated_at).toISOString() : null; if (t && t > lastSalesSyncTs) lastSalesSyncTs = t; } catch(_) {}
                 saveToLocalStorage();
-                if (!isUserBusy()) loadSales(); else pendingRemoteUpdate = true;
+                if (!isUserBusy()) {
+                    loadSales();
+                    if (currentPage === 'reports') {
+                        try { refreshReportData(true); } catch (_) {}
+                    }
+                } else {
+                    pendingRemoteUpdate = true;
+                }
             }
         } catch (_) {}
     });
@@ -3404,7 +3411,14 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
             if (idx >= 0) {
                 sales[idx] = { ...sales[idx], ...s };
                 saveToLocalStorage();
-                if (!isUserBusy()) loadSales(); else pendingRemoteUpdate = true;
+                if (!isUserBusy()) {
+                    loadSales();
+                    if (currentPage === 'reports') {
+                        try { refreshReportData(true); } catch (_) {}
+                    }
+                } else {
+                    pendingRemoteUpdate = true;
+                }
             }
         } catch (_) {}
     });
@@ -3415,7 +3429,14 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
             const rn = s.receiptnumber || s.receiptNumber;
             sales = sales.filter(x => x.receiptNumber !== rn);
             saveToLocalStorage();
-            if (!isUserBusy()) loadSales(); else pendingRemoteUpdate = true;
+            if (!isUserBusy()) {
+                loadSales();
+                if (currentPage === 'reports') {
+                    try { refreshReportData(true); } catch (_) {}
+                }
+            } else {
+                pendingRemoteUpdate = true;
+            }
         } catch (_) {}
     });
   
@@ -4606,7 +4627,7 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
     const periodEl = document.getElementById('report-period');
     const startEl = document.getElementById('report-start-date');
     const endEl = document.getElementById('report-end-date');
-    const debouncedRefreshReports = debounce(() => refreshReportData(), 150);
+    const debouncedRefreshReports = debounce(() => refreshReportData(true), 150);
     if (periodEl) {
         periodEl.addEventListener('change', () => {
             const v = periodEl.value || 'day';
@@ -4671,7 +4692,7 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
     const startIso = rangeStart ? rangeStart.toISOString() : '1970-01-01T00:00:00.000Z';
     const endIso = rangeEnd ? rangeEnd.toISOString() : new Date().toISOString();
         Promise.allSettled([
-            DataModule.fetchSalesForRange(startIso, endIso),
+            DataModule.fetchSalesForRange(startIso, endIso, true),
             DataModule.fetchDeletedSales()
         ]).then(results => {
             const sRes = results[0];
@@ -4694,9 +4715,9 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
         });
   }
   
-  function refreshReportData() {
+  function refreshReportData(force = false) {
     try {
-        if (!shouldFetch(lastReportsRefreshAt)) {
+        if (!force && !shouldFetch(lastReportsRefreshAt)) {
             generateReport();
             return;
         }
@@ -4732,7 +4753,7 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
         const startIso = rangeStart ? rangeStart.toISOString() : '1970-01-01T00:00:00.000Z';
         const endIso = rangeEnd ? rangeEnd.toISOString() : new Date().toISOString();
         Promise.allSettled([
-            DataModule.fetchSalesForRange(startIso, endIso),
+            DataModule.fetchSalesForRange(startIso, endIso, force),
             DataModule.fetchDeletedSales()
         ]).then(results => {
             const sRes = results[0];
@@ -5533,6 +5554,9 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
             updateCart();
             
             loadSales();
+            if (currentPage === 'reports') {
+                try { refreshReportData(true); } catch (_) {}
+            }
             
             showNotification('Sale completed successfully', 'success');
             
@@ -7607,11 +7631,15 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
         lastProductsSyncTs = normalizeSyncTs(lastProductsSyncTs);
         lastSalesSyncTs = normalizeSyncTs(lastSalesSyncTs);
         try { await DataModule.fetchProductsSince(lastProductsSyncTs, true); } catch (_) {}
-        try { await DataModule.fetchSalesSince(lastSalesSyncTs); } catch (_) {}
+        try { await DataModule.fetchSalesSince(lastSalesSyncTs, true); } catch (_) {}
         const changed = lastProductsSyncTs !== prevP || lastSalesSyncTs !== prevS;
         if (changed) {
             if (!isUserBusy()) {
-                refreshVisibleData();
+                if (currentPage === 'reports') {
+                    try { refreshReportData(true); } catch (_) {}
+                } else {
+                    refreshVisibleData();
+                }
             } else {
                 pendingRemoteUpdate = true;
             }
