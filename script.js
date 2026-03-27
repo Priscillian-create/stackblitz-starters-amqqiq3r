@@ -241,7 +241,7 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
   function refreshVisibleData() {
     if (currentPage === 'inventory') loadInventory();
     else if (currentPage === 'stock') loadStockCheck();
-    else if (currentPage === 'reports') refreshReportData();
+    else if (currentPage === 'reports') refreshReportData(true);
     else if (currentPage === 'sales' || currentPage === 'daily-sales') loadSales();
     else if (currentPage === 'deleted-sales') loadDeletedSales();
     else loadProducts();
@@ -4617,7 +4617,7 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
   
   function loadReports() {
     const reportsLoading = document.getElementById('reports-loading');
-    if (reportsLoading) reportsLoading.style.display = 'none';
+    if (reportsLoading) reportsLoading.style.display = 'flex';
     
     const today = new Date().toISOString().split('T')[0];
     const reportDateEl = document.getElementById('report-date');
@@ -4689,6 +4689,7 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
         if (e) { rangeEnd = new Date(e); rangeEnd.setHours(23,59,59,999); }
     }
     generateReport();
+    if (reportsLoading) reportsLoading.style.display = 'none';
     const startIso = rangeStart ? rangeStart.toISOString() : '1970-01-01T00:00:00.000Z';
     const endIso = rangeEnd ? rangeEnd.toISOString() : new Date().toISOString();
         Promise.allSettled([
@@ -4722,7 +4723,7 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
             return;
         }
         const reportsLoading = document.getElementById('reports-loading');
-        if (reportsLoading) reportsLoading.style.display = 'none';
+        if (reportsLoading) reportsLoading.style.display = 'flex';
         isReportsLoading = false;
         const reportDateEl = document.getElementById('report-date');
         const periodEl = document.getElementById('report-period');
@@ -4773,8 +4774,10 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
             }
             updateSalesTables();
             generateReport();
+            if (reportsLoading) reportsLoading.style.display = 'none';
         }).catch(() => {
             generateReport();
+            if (reportsLoading) reportsLoading.style.display = 'none';
         });
         lastReportsRefreshAt = Date.now();
     } catch (_) {
@@ -4900,20 +4903,16 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
         let dailyCash = 0;
         let dailyPos = 0;
         
-        const dailySales = [];
+        const salesInRange = [];
         
         activeSales.forEach(sale => {
             if (!sale || typeof sale !== 'object' || !sale.created_at) return;
-            
             const saleDate = new Date(sale.created_at);
-            
             if (isNaN(saleDate.getTime())) return;
-            
-            const sameDay = saleDate.getFullYear() === selectedDateObj.getFullYear() &&
-                saleDate.getMonth() === selectedDateObj.getMonth() &&
-                saleDate.getDate() === selectedDateObj.getDate();
-            
-            if (sameDay) {
+            const inRange = (rangeStartTop && rangeEndTop)
+                ? (saleDate >= rangeStartTop && saleDate <= rangeEndTop)
+                : true;
+            if (inRange) {
                 dailyTotal += sale.total || 0;
                 dailyTransactions++;
                 
@@ -4928,7 +4927,7 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
                 } else if (pm2 === 'pos') {
                     dailyPos += sale.total || 0;
                 }
-                dailySales.push(sale);
+                salesInRange.push(sale);
             }
         });
         
@@ -4950,7 +4949,7 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
             return;
         }
         
-        if (dailySales.length === 0) {
+        if (salesInRange.length === 0) {
             dailySalesTableBody.innerHTML = `
                 <tr>
                     <td colspan="5" class="no-data">No sales data for selected date</td>
@@ -4958,7 +4957,7 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
             `;
         } else {
             dailySalesTableBody.innerHTML = '';
-            dailySales.sort((a, b) => {
+            salesInRange.sort((a, b) => {
                 const dateA = a.created_at ? new Date(a.created_at) : new Date(0);
                 const dateB = b.created_at ? new Date(b.created_at) : new Date(0);
                 return dateB - dateA;
@@ -4967,8 +4966,8 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
             const chunkSize = 100;
             function renderDailyChunk() {
                 let html = '';
-                for (let i = 0; i < chunkSize && idx < dailySales.length; i++, idx++) {
-                    const sale = dailySales[idx];
+                for (let i = 0; i < chunkSize && idx < salesInRange.length; i++, idx++) {
+                    const sale = salesInRange[idx];
                     let actionButtons = `
                         <button class="btn-edit" onclick="viewSale('${sale.id}')" title="View Sale">
                             <i class="fas fa-eye"></i>
@@ -4999,7 +4998,7 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
                     `;
                 }
                 if (html) dailySalesTableBody.insertAdjacentHTML('beforeend', html);
-                if (idx < dailySales.length) {
+                if (idx < salesInRange.length) {
                     requestAnimationFrame(renderDailyChunk);
                 }
             }
@@ -7623,7 +7622,6 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
         checkSupabaseConnection();
     }
 
-    // Background sync so other-device updates appear without manual refresh/clearing storage
     setInterval(async () => {
         if (!isOnline || !currentUser) return;
         const prevP = lastProductsSyncTs;
@@ -7644,7 +7642,7 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
                 pendingRemoteUpdate = true;
             }
         }
-    }, 20000);
+    }, 5000);
 
     // Apply any queued UI refresh when the user is idle
     setInterval(() => {
