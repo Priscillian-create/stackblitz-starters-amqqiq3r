@@ -1000,7 +1000,7 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
                     if (!out.receiptNumber && out.receiptnumber) out.receiptNumber = out.receiptnumber;
                     if (!Array.isArray(out.items)) out.items = [];
                     if (typeof out.total !== 'number') out.total = parseFloat(out.total) || 0;
-                    if (!out.created_at) out.created_at = new Date().toISOString();
+                    if (!out.created_at) out.created_at = '1970-01-01T00:00:00.000Z';
                     const pm = ((out.paymentMethod || out.paymentmethod || '') + '').toLowerCase();
                     if (!out.paymentMethod && pm) out.paymentMethod = pm;
                     return out;
@@ -1400,7 +1400,7 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
                             sale.total = parseFloat(sale.total) || 0;
                         }
                         if (!sale.created_at) {
-                            sale.created_at = new Date().toISOString();
+                            sale.created_at = '1970-01-01T00:00:00.000Z';
                         }
                         return sale;
                         });
@@ -1489,7 +1489,7 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
                         if (!sale.receiptNumber && !sale.receiptnumber) sale.receiptNumber = `UNKNOWN_${Date.now()}`;
                         if (!sale.items) sale.items = [];
                         if (typeof sale.total !== 'number') sale.total = parseFloat(sale.total) || 0;
-                        if (!sale.created_at) sale.created_at = new Date().toISOString();
+                        if (!sale.created_at) sale.created_at = '1970-01-01T00:00:00.000Z';
                         return sale;
                     });
 
@@ -4081,23 +4081,26 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
   function formatDate(date, short = false) {
     if (!date) return '-';
     
+    let d;
     if (typeof date === 'string') {
-        const d = new Date(date);
-        
-        if (isNaN(d.getTime())) {
-            return '-';
+        const s = date.trim();
+        // If it's exactly YYYY-MM-DD, parse as local midnight
+        if (/^\d{4}-\d{2}-\d{2}$/.test(s)) {
+            d = new Date(Number(s.slice(0,4)), Number(s.slice(5,7)) - 1, Number(s.slice(8,10)));
+        } else {
+            d = new Date(s);
+            if (isNaN(d.getTime())) {
+                const m = s.match(/^(\d{4}-\d{2}-\d{2})/);
+                if (m) {
+                    d = new Date(Number(m[1].slice(0,4)), Number(m[1].slice(5,7)) - 1, Number(m[1].slice(8,10)));
+                }
+            }
         }
-        
-        if (short) {
-            return d.toLocaleDateString();
-        }
-        
-        return d.toLocaleDateString() + ' ' + d.toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'});
+    } else {
+        d = date instanceof Date ? date : new Date(date);
     }
     
-    const d = date instanceof Date ? date : new Date(date);
-    
-    if (isNaN(d.getTime())) {
+    if (!d || isNaN(d.getTime())) {
         return '-';
     }
     
@@ -4106,6 +4109,71 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
     }
     
     return d.toLocaleDateString() + ' ' + d.toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'});
+  }
+  
+  function parseDateInput(value) {
+    if (!value) {
+      const now = new Date();
+      return new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    }
+    const s = String(value).trim();
+    if (/^\d{4}-\d{2}-\d{2}$/.test(s)) {
+      return new Date(Number(s.slice(0,4)), Number(s.slice(5,7)) - 1, Number(s.slice(8,10)));
+    }
+    const d = new Date(s);
+    if (!isNaN(d.getTime())) {
+      return new Date(d.getFullYear(), d.getMonth(), d.getDate());
+    }
+    return new Date();
+  }
+  
+  function parseSaleDate(value) {
+    if (!value) return null;
+    const s = String(value).trim();
+    
+    // If it's strictly a date string YYYY-MM-DD, treat it as local midnight
+    if (/^\d{4}-\d{2}-\d{2}$/.test(s)) {
+      return new Date(Number(s.slice(0,4)), Number(s.slice(5,7)) - 1, Number(s.slice(8,10)));
+    }
+    
+    // Otherwise, parse as normal (handles ISO strings properly converting to local time)
+    let d = new Date(s);
+    if (isNaN(d.getTime())) {
+      // Fallback for some non-standard formats
+      const m = s.match(/^(\d{4}-\d{2}-\d{2})/);
+      if (m) {
+        return new Date(Number(m[1].slice(0,4)), Number(m[1].slice(5,7)) - 1, Number(m[1].slice(8,10)));
+      }
+    }
+    if (isNaN(d.getTime())) return null;
+    return d;
+  }
+  
+  function computeRange(period, selectedDateObj, startStr, endStr) {
+    let rangeStart = null, rangeEnd = null;
+    if (period === 'day') {
+      rangeStart = new Date(selectedDateObj); rangeStart.setHours(0,0,0,0);
+      rangeEnd = new Date(selectedDateObj); rangeEnd.setHours(23,59,59,999);
+    } else if (period === 'week') {
+      const d = new Date(selectedDateObj);
+      const diffToMonday = (d.getDay() + 6) % 7;
+      rangeStart = new Date(d); rangeStart.setDate(d.getDate() - diffToMonday); rangeStart.setHours(0,0,0,0);
+      rangeEnd = new Date(rangeStart); rangeEnd.setDate(rangeStart.getDate() + 6); rangeEnd.setHours(23,59,59,999);
+    } else if (period === 'month') {
+      const d = new Date(selectedDateObj);
+      rangeStart = new Date(d.getFullYear(), d.getMonth(), 1); rangeStart.setHours(0,0,0,0);
+      rangeEnd = new Date(d.getFullYear(), d.getMonth() + 1, 0); rangeEnd.setHours(23,59,59,999);
+    } else {
+      const s = startStr ? new Date(startStr) : null;
+      const e = endStr ? new Date(endStr) : null;
+      if (s && !isNaN(s.getTime())) { rangeStart = new Date(s); rangeStart.setHours(0,0,0,0); }
+      if (e && !isNaN(e.getTime())) { rangeEnd = new Date(e); rangeEnd.setHours(23,59,59,999); }
+      if (!rangeStart || !rangeEnd) {
+        rangeStart = new Date(selectedDateObj); rangeStart.setHours(0,0,0,0);
+        rangeEnd = new Date(selectedDateObj); rangeEnd.setHours(23,59,59,999);
+      }
+    }
+    return { rangeStart, rangeEnd };
   }
   
   function scheduleRender(fn) {
@@ -4542,8 +4610,8 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
     } else {
         salesTableBody.innerHTML = '';
         const sortedSales = [...activeSales].sort((a, b) => {
-            const dateA = a.created_at ? new Date(a.created_at) : new Date(0);
-            const dateB = b.created_at ? new Date(b.created_at) : new Date(0);
+            const dateA = a.created_at ? (parseSaleDate(a.created_at) || new Date(0)) : new Date(0);
+            const dateB = b.created_at ? (parseSaleDate(b.created_at) || new Date(0)) : new Date(0);
             return dateB - dateA;
         });
         const recentSales = sortedSales.slice(0, 10);
@@ -4660,99 +4728,65 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
         });
     }
     
-    isReportsLoading = false;
+    isReportsLoading = true;
     const todayR = new Date().toISOString().split('T')[0];
     const reportDateElR = document.getElementById('report-date');
     if (reportDateElR && !reportDateElR.value) reportDateElR.value = todayR;
     const periodElR = document.getElementById('report-period');
     const startElR = document.getElementById('report-start-date');
     const endElR = document.getElementById('report-end-date');
-    let selectedDateObj = reportDateElR && reportDateElR.value ? new Date(reportDateElR.value) : new Date();
-    let rangeStart, rangeEnd;
+    const selectedDateObj = parseDateInput(reportDateElR ? reportDateElR.value : todayR);
     const v = periodElR ? (periodElR.value || 'day') : 'day';
-    if (v === 'day') {
-        rangeStart = new Date(selectedDateObj); rangeStart.setHours(0,0,0,0);
-        rangeEnd = new Date(selectedDateObj); rangeEnd.setHours(23,59,59,999);
-    } else if (v === 'week') {
-        const d = new Date(selectedDateObj);
-        const diffToMonday = (d.getDay() + 6) % 7;
-        rangeStart = new Date(d); rangeStart.setDate(d.getDate() - diffToMonday); rangeStart.setHours(0,0,0,0);
-        rangeEnd = new Date(rangeStart); rangeEnd.setDate(rangeStart.getDate() + 6); rangeEnd.setHours(23,59,59,999);
-    } else if (v === 'month') {
-        const d = new Date(selectedDateObj);
-        rangeStart = new Date(d.getFullYear(), d.getMonth(), 1); rangeStart.setHours(0,0,0,0);
-        rangeEnd = new Date(d.getFullYear(), d.getMonth() + 1, 0); rangeEnd.setHours(23,59,59,999);
-    } else {
-        const s = startElR && startElR.value ? new Date(startElR.value) : null;
-        const e = endElR && endElR.value ? new Date(endElR.value) : null;
-        if (s) { rangeStart = new Date(s); rangeStart.setHours(0,0,0,0); }
-        if (e) { rangeEnd = new Date(e); rangeEnd.setHours(23,59,59,999); }
-    }
-    generateReport();
-    if (reportsLoading) reportsLoading.style.display = 'none';
-    const startIso = rangeStart ? rangeStart.toISOString() : '1970-01-01T00:00:00.000Z';
-    const endIso = rangeEnd ? rangeEnd.toISOString() : new Date().toISOString();
-        Promise.allSettled([
-            DataModule.fetchSalesForRange(startIso, endIso, true),
-            DataModule.fetchDeletedSales()
-        ]).then(results => {
-            const sRes = results[0];
-            const dRes = results[1];
-            if (sRes.status === 'fulfilled' && Array.isArray(sRes.value)) {
-                sales = DataModule.mergeSalesData(sRes.value);
-            }
-            if (dRes.status === 'fulfilled' && Array.isArray(dRes.value)) {
-                const existingDeletedIds = new Set(deletedSales.map(s => s.id || s.receiptnumber));
-                dRes.value.forEach(s => {
-                    if (!existingDeletedIds.has(s.id || s.receiptnumber)) {
-                        deletedSales.push(s);
-                    }
-                });
-            }
-            updateSalesTables();
-            generateReport();
-        }).catch(() => {
-            generateReport();
+    const rng = computeRange(v, selectedDateObj, startElR ? startElR.value : null, endElR ? endElR.value : null);
+    const startIso = rng.rangeStart ? rng.rangeStart.toISOString() : '1970-01-01T00:00:00.000Z';
+    const endIso = rng.rangeEnd ? rng.rangeEnd.toISOString() : new Date().toISOString();
+    Promise.allSettled([
+      DataModule.fetchSalesForRange(startIso, endIso, true),
+      DataModule.fetchDeletedSales()
+    ]).then(results => {
+      const sRes = results[0];
+      const dRes = results[1];
+      if (sRes.status === 'fulfilled' && Array.isArray(sRes.value)) {
+        sales = DataModule.mergeSalesData(sRes.value);
+      }
+      if (dRes.status === 'fulfilled' && Array.isArray(dRes.value)) {
+        const existingDeletedIds = new Set(deletedSales.map(s => s.id || s.receiptnumber));
+        dRes.value.forEach(s => {
+          if (!existingDeletedIds.has(s.id || s.receiptnumber)) {
+            deletedSales.push(s);
+          }
         });
+      }
+      updateSalesTables();
+      isReportsLoading = false;
+      generateReport();
+      if (reportsLoading) reportsLoading.style.display = 'none';
+    }).catch(() => {
+      isReportsLoading = false;
+      generateReport();
+      if (reportsLoading) reportsLoading.style.display = 'none';
+    });
   }
   
-  function refreshReportData(force = false) {
+  function refreshReportData(force = false, silent = false) {
     try {
         if (!force && !shouldFetch(lastReportsRefreshAt)) {
+            isReportsLoading = false;
             generateReport();
             return;
         }
         const reportsLoading = document.getElementById('reports-loading');
-        if (reportsLoading) reportsLoading.style.display = 'flex';
-        isReportsLoading = false;
+        if (reportsLoading && !silent) reportsLoading.style.display = 'flex';
+        isReportsLoading = true;
         const reportDateEl = document.getElementById('report-date');
         const periodEl = document.getElementById('report-period');
         const startEl = document.getElementById('report-start-date');
         const endEl = document.getElementById('report-end-date');
-        const selectedDateObj = reportDateEl && reportDateEl.value ? new Date(reportDateEl.value) : new Date();
+        const selectedDateObj = parseDateInput(reportDateEl && reportDateEl.value ? reportDateEl.value : '');
         const v = periodEl ? (periodEl.value || 'day') : 'day';
-        let rangeStart, rangeEnd;
-        if (v === 'day') {
-            rangeStart = new Date(selectedDateObj); rangeStart.setHours(0,0,0,0);
-            rangeEnd = new Date(selectedDateObj); rangeEnd.setHours(23,59,59,999);
-        } else if (v === 'week') {
-            const d = new Date(selectedDateObj);
-            const diffToMonday = (d.getDay() + 6) % 7;
-            rangeStart = new Date(d); rangeStart.setDate(d.getDate() - diffToMonday); rangeStart.setHours(0,0,0,0);
-            rangeEnd = new Date(rangeStart); rangeEnd.setDate(rangeStart.getDate() + 6); rangeEnd.setHours(23,59,59,999);
-        } else if (v === 'month') {
-            const d = new Date(selectedDateObj);
-            rangeStart = new Date(d.getFullYear(), d.getMonth(), 1); rangeStart.setHours(0,0,0,0);
-            rangeEnd = new Date(d.getFullYear(), d.getMonth() + 1, 0); rangeEnd.setHours(23,59,59,999);
-        } else {
-            const s = startEl && startEl.value ? new Date(startEl.value) : null;
-            const e = endEl && endEl.value ? new Date(endEl.value) : null;
-            if (s) { rangeStart = new Date(s); rangeStart.setHours(0,0,0,0); }
-            if (e) { rangeEnd = new Date(e); rangeEnd.setHours(23,59,59,999); }
-        }
-        generateReport();
-        const startIso = rangeStart ? rangeStart.toISOString() : '1970-01-01T00:00:00.000Z';
-        const endIso = rangeEnd ? rangeEnd.toISOString() : new Date().toISOString();
+        const rng = computeRange(v, selectedDateObj, startEl ? startEl.value : null, endEl ? endEl.value : null);
+        const startIso = rng.rangeStart ? rng.rangeStart.toISOString() : '1970-01-01T00:00:00.000Z';
+        const endIso = rng.rangeEnd ? rng.rangeEnd.toISOString() : new Date().toISOString();
         Promise.allSettled([
             DataModule.fetchSalesForRange(startIso, endIso, force),
             DataModule.fetchDeletedSales()
@@ -4773,9 +4807,11 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
                 });
             }
             updateSalesTables();
+            isReportsLoading = false;
             generateReport();
             if (reportsLoading) reportsLoading.style.display = 'none';
         }).catch(() => {
+            isReportsLoading = false;
             generateReport();
             if (reportsLoading) reportsLoading.style.display = 'none';
         });
@@ -4783,6 +4819,7 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
     } catch (_) {
         const reportsLoading = document.getElementById('reports-loading');
         if (reportsLoading) reportsLoading.style.display = 'none';
+        isReportsLoading = false;
         generateReport();
     }
   }
@@ -4791,18 +4828,8 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
     try {
         if (isReportsLoading) return;
         const reportDateEl = document.getElementById('report-date');
-        const selectedDate = reportDateEl ? reportDateEl.value : new Date().toISOString().split('T')[0];
-        let selectedDateObj = null;
-        if (selectedDate && typeof selectedDate === 'string') {
-            const parts = selectedDate.split('-').map(Number);
-            if (parts.length === 3 && !parts.some(isNaN)) {
-                selectedDateObj = new Date(parts[0], parts[1] - 1, parts[2]);
-            }
-        }
-        if (!selectedDateObj) {
-            const now = new Date();
-            selectedDateObj = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-        }
+        const selectedDateStr = reportDateEl ? reportDateEl.value : new Date().toISOString().split('T')[0];
+        const selectedDateObj = parseDateInput(selectedDateStr);
         
         const activeSales = Array.isArray(sales) ? sales.filter(s => !s.deleted && !s.deleted_at && !s.deletedAt) : [];
         const archivedSales = Array.isArray(deletedSales) ? deletedSales : [];
@@ -4817,48 +4844,13 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
 
         const periodElTop = document.getElementById('report-period');
         const periodTop = periodElTop ? (periodElTop.value || 'day') : 'day';
-        let rangeStartTop = null;
-        let rangeEndTop = null;
-        if (periodTop === 'day') {
-            rangeStartTop = new Date(selectedDateObj);
-            rangeStartTop.setHours(0,0,0,0);
-            rangeEndTop = new Date(selectedDateObj);
-            rangeEndTop.setHours(23,59,59,999);
-        } else if (periodTop === 'week') {
-            const d = new Date(selectedDateObj);
-            const diffToMonday = (d.getDay() + 6) % 7;
-            rangeStartTop = new Date(d);
-            rangeStartTop.setDate(d.getDate() - diffToMonday);
-            rangeStartTop.setHours(0,0,0,0);
-            rangeEndTop = new Date(rangeStartTop);
-            rangeEndTop.setDate(rangeStartTop.getDate() + 6);
-            rangeEndTop.setHours(23,59,59,999);
-        } else if (periodTop === 'month') {
-            const d = new Date(selectedDateObj);
-            rangeStartTop = new Date(d.getFullYear(), d.getMonth(), 1);
-            rangeStartTop.setHours(0,0,0,0);
-            rangeEndTop = new Date(d.getFullYear(), d.getMonth() + 1, 0);
-            rangeEndTop.setHours(23,59,59,999);
-        } else if (periodTop === 'custom') {
-            const startElTop = document.getElementById('report-start-date');
-            const endElTop = document.getElementById('report-end-date');
-            const sTop = startElTop && startElTop.value ? new Date(startElTop.value) : null;
-            const eTop = endElTop && endElTop.value ? new Date(endElTop.value) : null;
-            if (sTop && !isNaN(sTop.getTime())) {
-                rangeStartTop = sTop;
-                rangeStartTop.setHours(0,0,0,0);
-            }
-            if (eTop && !isNaN(eTop.getTime())) {
-                rangeEndTop = eTop;
-                rangeEndTop.setHours(23,59,59,999);
-            }
-        }
-        const filteredForSummary = (rangeStartTop && rangeEndTop)
+        const rngTop = computeRange(periodTop, selectedDateObj, (document.getElementById('report-start-date') || {}).value, (document.getElementById('report-end-date') || {}).value);
+        const filteredForSummary = (rngTop.rangeStart && rngTop.rangeEnd)
             ? activeSales.filter(sale => {
                 if (!sale || !sale.created_at) return false;
-                const d = new Date(sale.created_at);
-                if (isNaN(d.getTime())) return false;
-                return d >= rangeStartTop && d <= rangeEndTop;
+                const d = parseSaleDate(sale.created_at);
+                if (!d || isNaN(d.getTime())) return false;
+                return d >= rngTop.rangeStart && d <= rngTop.rangeEnd;
             })
             : activeSales;
         let totalSales = 0;
@@ -4897,6 +4889,8 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
         if (totalPosEl) totalPosEl.textContent = formatCurrency(totalPos);
         lastOverallTotals = { total: totalSales, transactions: totalTransactions, items: totalItemsSold, cash: totalCash, pos: totalPos };
         
+        // Daily section should ALWAYS reflect a single day, independent of selected period
+        const dayRng = computeRange('day', selectedDateObj);
         let dailyTotal = 0;
         let dailyTransactions = 0;
         let dailyItems = 0;
@@ -4907,10 +4901,10 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
         
         activeSales.forEach(sale => {
             if (!sale || typeof sale !== 'object' || !sale.created_at) return;
-            const saleDate = new Date(sale.created_at);
-            if (isNaN(saleDate.getTime())) return;
-            const inRange = (rangeStartTop && rangeEndTop)
-                ? (saleDate >= rangeStartTop && saleDate <= rangeEndTop)
+            const saleDate = parseSaleDate(sale.created_at);
+            if (!saleDate || isNaN(saleDate.getTime())) return;
+            const inRange = (dayRng.rangeStart && dayRng.rangeEnd)
+                ? (saleDate >= dayRng.rangeStart && saleDate <= dayRng.rangeEnd)
                 : true;
             if (inRange) {
                 dailyTotal += sale.total || 0;
@@ -4956,15 +4950,23 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
                 </tr>
             `;
         } else {
-            dailySalesTableBody.innerHTML = '';
+            // Show a lightweight loading message before incremental rendering
+            dailySalesTableBody.innerHTML = `
+                <tr>
+                    <td colspan="5" class="no-data">Loading daily sales...</td>
+                </tr>
+            `;
             salesInRange.sort((a, b) => {
-                const dateA = a.created_at ? new Date(a.created_at) : new Date(0);
-                const dateB = b.created_at ? new Date(b.created_at) : new Date(0);
+                const dateA = a.created_at ? (parseSaleDate(a.created_at) || new Date(0)) : new Date(0);
+                const dateB = b.created_at ? (parseSaleDate(b.created_at) || new Date(0)) : new Date(0);
                 return dateB - dateA;
             });
             let idx = 0;
-            const chunkSize = 100;
+            const chunkSize = 75;
             function renderDailyChunk() {
+                if (idx === 0) {
+                    dailySalesTableBody.innerHTML = '';
+                }
                 let html = '';
                 for (let i = 0; i < chunkSize && idx < salesInRange.length; i++, idx++) {
                     const sale = salesInRange[idx];
@@ -5006,50 +5008,14 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
         }
         const periodEl2 = document.getElementById('report-period');
         const period = periodEl2 ? (periodEl2.value || 'day') : 'day';
-        let rangeStart = null;
-        let rangeEnd = null;
-        if (period === 'day') {
-            rangeStart = new Date(selectedDateObj);
-            rangeStart.setHours(0,0,0,0);
-            rangeEnd = new Date(selectedDateObj);
-            rangeEnd.setHours(23,59,59,999);
-        } else if (period === 'week') {
-            const d = new Date(selectedDateObj);
-            const day = d.getDay();
-            const diffToMonday = (day + 6) % 7;
-            rangeStart = new Date(d);
-            rangeStart.setDate(d.getDate() - diffToMonday);
-            rangeStart.setHours(0,0,0,0);
-            rangeEnd = new Date(rangeStart);
-            rangeEnd.setDate(rangeStart.getDate() + 6);
-            rangeEnd.setHours(23,59,59,999);
-        } else if (period === 'month') {
-            const d = new Date(selectedDateObj);
-            rangeStart = new Date(d.getFullYear(), d.getMonth(), 1);
-            rangeEnd = new Date(d.getFullYear(), d.getMonth() + 1, 0);
-            rangeStart.setHours(0,0,0,0);
-            rangeEnd.setHours(23,59,59,999);
-        } else if (period === 'custom') {
-            const startEl2 = document.getElementById('report-start-date');
-            const endEl2 = document.getElementById('report-end-date');
-            const s = startEl2 && startEl2.value ? new Date(startEl2.value) : null;
-            const e = endEl2 && endEl2.value ? new Date(endEl2.value) : null;
-            if (s && !isNaN(s.getTime())) {
-                rangeStart = s;
-                rangeStart.setHours(0,0,0,0);
-            }
-            if (e && !isNaN(e.getTime())) {
-                rangeEnd = e;
-                rangeEnd.setHours(23,59,59,999);
-            }
-        }
+        const rng = computeRange(period, selectedDateObj, (document.getElementById('report-start-date') || {}).value, (document.getElementById('report-end-date') || {}).value);
         let filteredActiveSales = activeSales;
-        if (rangeStart && rangeEnd) {
+        if (rng.rangeStart && rng.rangeEnd) {
             filteredActiveSales = activeSales.filter(sale => {
                 if (!sale || !sale.created_at) return false;
-                const d = new Date(sale.created_at);
-                if (isNaN(d.getTime())) return false;
-                return d >= rangeStart && d <= rangeEnd;
+                const d = parseSaleDate(sale.created_at);
+                if (!d || isNaN(d.getTime())) return false;
+                return d >= rng.rangeStart && d <= rng.rangeEnd;
             });
         }
         const productCountMap = new Map();
@@ -5090,9 +5056,14 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
         // Newly added products
         const newProducts = products.filter(p => {
             if (!p || !p.created_at || p.deleted) return false;
-            const d = new Date(p.created_at);
-            return d >= rangeStart && d <= rangeEnd;
-        }).sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+            const d = parseSaleDate(p.created_at);
+            if (!d || isNaN(d.getTime())) return false;
+            return d >= rng.rangeStart && d <= rng.rangeEnd;
+        }).sort((a, b) => {
+            const dA = parseSaleDate(a.created_at) || new Date(0);
+            const dB = parseSaleDate(b.created_at) || new Date(0);
+            return dB - dA;
+        });
 
         const productSearchEl2 = document.getElementById('report-product-search');
         const categorySearchEl2 = document.getElementById('report-category-search');
@@ -7634,7 +7605,7 @@ if ('serviceWorker' in navigator && !window.location.hostname.includes('stackbli
         if (changed) {
             if (!isUserBusy()) {
                 if (currentPage === 'reports') {
-                    try { refreshReportData(true); } catch (_) {}
+                    try { refreshReportData(true, true); } catch (_) {}
                 } else {
                     refreshVisibleData();
                 }
