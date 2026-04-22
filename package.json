@@ -1,0 +1,8 @@
+{
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "servor": "^4.0.2"
+  }
+}
