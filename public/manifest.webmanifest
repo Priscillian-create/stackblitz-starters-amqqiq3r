@@ -1,0 +1,19 @@
+{
+  "name": "PA GERRY POS",
+  "short_name": "PA GERRY POS",
+  "description": "Sales, inventory, expenses, analytics, and offline-ready POS for PA GERRY POS.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#081827",
+  "theme_color": "#0c4f82",
+  "orientation": "landscape-primary",
+  "icons": [
+    {
+      "src": "/favicon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}
