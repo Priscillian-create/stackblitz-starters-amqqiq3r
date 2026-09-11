@@ -445,6 +445,44 @@ textarea:focus {
   flex: 1;
 }
 
+.category-page {
+  display: grid;
+  align-content: start;
+  gap: 1rem;
+  padding-block: 0.5rem;
+}
+
+.category-report-note,
+.category-page > p {
+  color: #b4c9da;
+  font-size: 0.875rem;
+}
+
+.product-results {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.product-pagination {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  flex-shrink: 0;
+  padding: 0.4rem 0;
+  font-size: 0.875rem;
+}
+
+.product-pagination > span {
+  margin-right: auto;
+}
+
+.product-pagination button:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
 .product-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(142px, 1fr));

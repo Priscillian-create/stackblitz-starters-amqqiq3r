@@ -1,6 +1,8 @@
 "use client";
 
-import { FormEvent, memo, useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
+import { FormEvent, ReactNode, memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { summarizeCategories } from "./category-summary";
+import { summarizeCategorySales } from "./category-sales";
 
 type Product = {
   id: string;
@@ -125,7 +127,6 @@ const productCategories = [
   "Provisions",
   "Foodstuffs",
   "Cosmetics",
-  "Drugs",
   "Household",
   "Snacks",
   "Bread",
@@ -166,12 +167,19 @@ const emptyProduct = (): Product => ({
   taxable: true,
 });
 
-const money = (value: number, currency = "NGN") =>
-  new Intl.NumberFormat("en-NG", {
-    style: "currency",
-    currency,
-    maximumFractionDigits: 0,
-  }).format(Number.isFinite(value) ? value : 0);
+const currencyFormatters = new Map<string, Intl.NumberFormat>();
+const money = (value: number, currency = "NGN") => {
+  let formatter = currencyFormatters.get(currency);
+  if (!formatter) {
+    formatter = new Intl.NumberFormat("en-NG", {
+      style: "currency",
+      currency,
+      maximumFractionDigits: 0,
+    });
+    currencyFormatters.set(currency, formatter);
+  }
+  return formatter.format(Number.isFinite(value) ? value : 0);
+};
 
 const dayKey = (date: string) => new Date(date).toISOString().slice(0, 10);
 const inputDate = (date = new Date()) => date.toISOString().slice(0, 10);
@@ -254,7 +262,6 @@ export default function Home() {
   const [cart, setCart] = useState<CartLine[]>([]);
   const [query, setQuery] = useState("");
   const [inventorySearch, setInventorySearch] = useState("");
-  const [inventorySearchResetKey, setInventorySearchResetKey] = useState(0);
   const [activeTab, setActiveTab] = useState("register");
   const [selectedCustomer, setSelectedCustomer] = useState("Walk-in Customer");
   const [paymentMethod, setPaymentMethod] = useState("Cash");
@@ -282,27 +289,25 @@ export default function Home() {
   const deletedSaleIdsRef = useRef(new Set<string>());
 
   useEffect(() => {
-    queueMicrotask(() => {
-      const savedAuth = window.localStorage.getItem(authStorageKey);
-      try {
-        if (savedAuth) {
-          const session = JSON.parse(savedAuth) as AuthSession;
-          setAuthSession(session);
-          setLoginDraft((current) => ({ ...current, email: session.user.email ?? "" }));
-        }
-      } catch {
-        window.localStorage.removeItem(authStorageKey);
+    const savedAuth = window.localStorage.getItem(authStorageKey);
+    try {
+      if (savedAuth) {
+        const session = JSON.parse(savedAuth) as AuthSession;
+        setAuthSession(session);
+        setLoginDraft((current) => ({ ...current, email: session.user.email ?? "" }));
       }
-      const saved = window.localStorage.getItem(storageKey);
-      try {
-        if (saved) {
-          setStore(normalizeStore(JSON.parse(saved)));
-        }
-      } catch {
-        window.localStorage.removeItem(storageKey);
+    } catch {
+      window.localStorage.removeItem(authStorageKey);
+    }
+    const saved = window.localStorage.getItem(storageKey);
+    try {
+      if (saved) {
+        setStore(normalizeStore(JSON.parse(saved)));
       }
-      setLocalReady(true);
-    });
+    } catch {
+      window.localStorage.removeItem(storageKey);
+    }
+    setLocalReady(true);
   }, []);
 
   useEffect(() => {
@@ -347,10 +352,8 @@ export default function Home() {
       });
     }
 
-    queueMicrotask(() => {
-      const standalone = window.matchMedia("(display-mode: standalone)").matches;
-      setIsAppInstalled(standalone || Boolean((navigator as Navigator & { standalone?: boolean }).standalone));
-    });
+    const standalone = window.matchMedia("(display-mode: standalone)").matches;
+    setIsAppInstalled(standalone || Boolean((navigator as Navigator & { standalone?: boolean }).standalone));
 
     const handleInstallPrompt = (event: Event) => {
       event.preventDefault();
@@ -404,10 +407,6 @@ export default function Home() {
         clearTimeout(syncTimer.current);
       }
       syncTimer.current = setTimeout(async () => {
-        if (userIsEditing()) {
-          syncTimer.current = setTimeout(() => syncWhenOnline(false), 2000);
-          return;
-        }
         syncBusyRef.current = true;
         try {
           if (pushFirst || hasUnsyncedWritesRef.current) {
@@ -421,7 +420,7 @@ export default function Home() {
     };
 
     syncWhenOnline(false);
-    const interval = window.setInterval(() => syncWhenOnline(false), 30000);
+    const interval = window.setInterval(() => syncWhenOnline(false), 10000);
     const handleOnline = () => syncWhenOnline(true);
     const handleFocus = () => syncWhenOnline(false);
     const handleVisible = () => {
@@ -445,13 +444,6 @@ export default function Home() {
 
   function hasSupabase() {
     return Boolean(supabaseConfig.url && supabaseConfig.anonKey);
-  }
-
-  function userIsEditing() {
-    const activeElement = document.activeElement;
-    return activeElement instanceof HTMLInputElement ||
-      activeElement instanceof HTMLTextAreaElement ||
-      activeElement instanceof HTMLSelectElement;
   }
 
   function markLocalWrite(blockMs = 6000) {
@@ -640,12 +632,7 @@ export default function Home() {
       ]);
       const itemsBySale = new Map<string, SupabaseSaleItem[]>();
       saleItems.forEach((item) => {
-        const bucket = itemsBySale.get(item.sale_id);
-        if (bucket) {
-          bucket.push(item);
-        } else {
-          itemsBySale.set(item.sale_id, [item]);
-        }
+        itemsBySale.set(item.sale_id, [...(itemsBySale.get(item.sale_id) ?? []), item]);
       });
       const localProductsById = new Map(storeRef.current.products.map((product) => [product.id, product]));
       const mergedProducts = products
@@ -656,14 +643,10 @@ export default function Home() {
             ? localProductsById.get(product.id)!
             : product
         ));
-      const mergedProductIds = new Set(mergedProducts.map((product) => product.id));
       protectedProductIdsRef.current.forEach((id) => {
-        if (!deletedProductIdsRef.current.has(id) && !mergedProductIds.has(id)) {
+        if (!deletedProductIdsRef.current.has(id) && !mergedProducts.some((product) => product.id === id)) {
           const localProduct = localProductsById.get(id);
-          if (localProduct) {
-            mergedProducts.unshift(localProduct);
-            mergedProductIds.add(id);
-          }
+          if (localProduct) mergedProducts.unshift(localProduct);
         }
       });
       const mergedSales = sales
@@ -852,10 +835,12 @@ export default function Home() {
     () => new Map(store.products.map((product) => [product.id, product])),
     [store.products],
   );
+  const categorySummaries = useMemo(
+    () => summarizeCategories(store.products, productCategories),
+    [store.products],
+  );
   const handleProductSearch = useCallback((value: string) => setQuery(value), []);
   const handleInventorySearch = useCallback((value: string) => setInventorySearch(value), []);
-  const deferredQuery = useDeferredValue(query);
-  const deferredInventorySearch = useDeferredValue(inventorySearch);
 
   const searchableProducts = useMemo(() => {
     return store.products.map((product) => {
@@ -876,12 +861,12 @@ export default function Home() {
   }, [store.products]);
 
   const visibleProducts = useMemo(() => {
-    const needle = deferredQuery.trim().toLowerCase();
+    const needle = query.trim().toLowerCase();
     if (!needle) return store.products;
     return searchableProducts
       .filter(({ searchText }) => searchText.includes(needle))
       .map(({ product }) => product);
-  }, [deferredQuery, searchableProducts, store.products]);
+  }, [query, searchableProducts, store.products]);
 
   const cartTotals = useMemo(() => {
     return cart.reduce(
@@ -935,16 +920,16 @@ export default function Home() {
   }, [store]);
 
   const filteredInventoryProducts = useMemo(() => {
-    const search = deferredInventorySearch.trim().toLowerCase();
+    const search = inventorySearch.trim().toLowerCase();
     if (!search) return store.products;
 
     return searchableProducts
       .filter(({ searchText }) => searchText.includes(search))
       .map(({ product }) => product);
-  }, [deferredInventorySearch, searchableProducts, store.products]);
+  }, [inventorySearch, searchableProducts, store.products]);
 
   const filteredSales = useMemo(() => {
-    if (activeTab !== "sales") return [];
+    if (activeTab !== "sales" && activeTab !== "sales-category") return [];
     return store.sales.filter((sale) => {
       const saleDate = dayKey(sale.createdAt);
       const afterStart = salesReportStart ? saleDate >= salesReportStart : true;
@@ -953,8 +938,13 @@ export default function Home() {
     });
   }, [activeTab, salesReportEnd, salesReportStart, store.sales]);
 
+  const categorySales = useMemo(
+    () => summarizeCategorySales(filteredSales, store.products),
+    [filteredSales, store.products],
+  );
+
   const salesReportTotals = useMemo(() => {
-    if (activeTab !== "sales") {
+    if (activeTab !== "sales" && activeTab !== "sales-category") {
       return { salesTotal: 0, cogs: 0, grossProfit: 0, expenses: 0, netProfit: 0 };
     }
     const salesTotal = filteredSales.reduce((sum, sale) => sum + sale.total, 0);
@@ -977,7 +967,7 @@ export default function Home() {
   }, [activeTab, filteredSales, salesReportEnd, salesReportStart, store.expenses]);
 
   const paymentBreakdown = useMemo(() => {
-    if (activeTab !== "sales") {
+    if (activeTab !== "sales" && activeTab !== "sales-category") {
       return paymentMethods.map((method) => ({ method, count: 0, total: 0 }));
     }
     return paymentMethods.map((method) => {
@@ -1079,7 +1069,7 @@ export default function Home() {
     setAnalyticsEnd(end);
   }
 
-  const addToCart = useCallback((product: Product) => {
+  function addToCart(product: Product) {
     if (product.stock <= 0) return;
     setCart((current) => {
       const existing = current.find((line) => line.productId === product.id);
@@ -1092,7 +1082,7 @@ export default function Home() {
       }
       return [...current, { productId: product.id, qty: 1, discount: 0 }];
     });
-  }, []);
+  }
 
   function updateCartLine(productId: string, field: "qty" | "discount", value: number) {
     const product = productsById.get(productId);
@@ -1168,18 +1158,14 @@ export default function Home() {
     void deleteSaleFromSupabase(sale, productsAfterRefund);
   }
 
-  const productFormExists = useMemo(
-    () => store.products.some((product) => product.id === editingProduct.id),
-    [editingProduct.id, store.products],
-  );
-
-  function saveProduct(productDraft: Product) {
-    const otherProducts = store.products.filter((item) => item.id !== productDraft.id);
+  function saveProduct(event: FormEvent) {
+    event.preventDefault();
+    const otherProducts = store.products.filter((item) => item.id !== editingProduct.id);
     const product = {
-      ...productDraft,
-      name: productDraft.name.trim(),
-      sku: productDraft.sku.trim(),
-      barcode: productDraft.barcode.trim(),
+      ...editingProduct,
+      name: editingProduct.name.trim(),
+      sku: editingProduct.sku.trim(),
+      barcode: editingProduct.barcode.trim(),
     };
     if (!product.name) return;
     if (!product.sku) product.sku = generateSku(product, otherProducts);
@@ -1272,7 +1258,9 @@ export default function Home() {
   const tabs = [
     { key: "register", label: "Point of Sale", note: "Sell items", icon: "POS" },
     { key: "inventory", label: "Inventory", note: "Products and stock", icon: "INV" },
+    { key: "categories", label: "Categories", note: "Stock and value by category", icon: "CAT" },
     { key: "sales", label: "Sales Reports", note: "Receipts and refunds", icon: "REP" },
+    { key: "sales-category", label: "Sales Category", note: "Sales and quantities by category", icon: "SCT" },
     { key: "reports", label: "Stock Check", note: "Profit and stock", icon: "STK" },
     { key: "expenses", label: "Expenses", note: "Running costs", icon: "EXP" },
     { key: "customers", label: "Customers", note: "Names and balances", icon: "CUS" },
@@ -1384,7 +1372,7 @@ export default function Home() {
                   ariaLabel="Search products"
                   className="input"
                   placeholder="Search item, SKU, barcode, or category"
-                  initialValue={query}
+                  value={query}
                   onSearch={handleProductSearch}
                 />
                 <button
@@ -1397,16 +1385,24 @@ export default function Home() {
                   Scan
                 </button>
               </div>
-              <div className="product-grid">
-                {visibleProducts.map((product) => (
-                  <ProductTile
+              <ProductResults key={query} products={visibleProducts} className="product-grid" label="Product results">
+                {(product) => (
+                  <button
                     key={product.id}
-                    product={product}
-                    currency={store.settings.currency}
-                    onAdd={addToCart}
-                  />
-                ))}
-              </div>
+                    className="product-tile"
+                    onClick={() => addToCart(product)}
+                    disabled={product.stock <= 0}
+                  >
+                    <span className="category-chip">{product.category}</span>
+                    <strong>{product.name}</strong>
+                    <span>{product.sku || product.barcode}</span>
+                    <span className="tile-row">
+                      <b>{money(product.price, store.settings.currency)}</b>
+                      <em>{product.stock} {product.unit}</em>
+                    </span>
+                  </button>
+                )}
+              </ProductResults>
             </div>
 
             <aside className="cart-section">
@@ -1500,23 +1496,15 @@ export default function Home() {
                 <label className="inventory-search-column">
                   <span>Search Products</span>
                   <SearchField
-                    key={inventorySearchResetKey}
                     ariaLabel="Search inventory products"
                     className="input inventory-search"
                     placeholder="Name, category, SKU, barcode, expiry..."
-                    initialValue={inventorySearch}
+                    value={inventorySearch}
                     onSearch={handleInventorySearch}
                   />
                 </label>
                 {inventorySearch && (
-                  <button
-                    type="button"
-                    className="secondary-button compact"
-                    onClick={() => {
-                      setInventorySearch("");
-                      setInventorySearchResetKey((current) => current + 1);
-                    }}
-                  >
+                  <button type="button" className="secondary-button compact" onClick={() => setInventorySearch("")}>
                     Clear
                   </button>
                 )}
@@ -1554,9 +1542,8 @@ export default function Home() {
               </div>
             )}
             <div className="inventory-workspace">
-              <div className="inventory-list" aria-label="Inventory products">
-                {filteredInventoryProducts.length === 0 && <p className="empty inventory-empty">No products found.</p>}
-                {filteredInventoryProducts.map((product) => {
+              <ProductResults key={inventorySearch} products={filteredInventoryProducts} className="inventory-list" label="Inventory products">
+                {(product) => {
                   const stockStatus = product.stock <= product.reorderLevel ? "Reorder" : "OK";
                   return (
                     <article className="inventory-row" key={product.id}>
@@ -1583,28 +1570,87 @@ export default function Home() {
                       )}
                     </article>
                   );
-                })}
-              </div>
+                }}
+              </ProductResults>
             </div>
             {isAdmin && isProductFormOpen && (
-              <ProductForm
-                key={editingProduct.id}
-                initialProduct={editingProduct}
-                isExisting={productFormExists}
-                onClose={() => setIsProductFormOpen(false)}
-                onSave={saveProduct}
-              />
+              <div className="product-modal" role="dialog" aria-modal="true" aria-labelledby="product-form-title">
+                <form className="form-panel product-dashboard" onSubmit={saveProduct}>
+                  <div className="product-dashboard-header">
+                    <div>
+                      <h2 id="product-form-title">{store.products.some((product) => product.id === editingProduct.id) ? "Edit Product" : "Add Product"}</h2>
+                      <p>Product dashboard</p>
+                    </div>
+                    <button type="button" className="icon-button" onClick={() => setIsProductFormOpen(false)} title="Close product form">x</button>
+                  </div>
+                  <input className="input" placeholder="Product name" value={editingProduct.name} onChange={(event) => setEditingProduct({ ...editingProduct, name: event.target.value })} />
+                  <div className="two-col">
+                    <input className="input" placeholder="SKU" value={editingProduct.sku} onChange={(event) => setEditingProduct({ ...editingProduct, sku: event.target.value })} />
+                    <input className="input" placeholder="Barcode" value={editingProduct.barcode} onChange={(event) => setEditingProduct({ ...editingProduct, barcode: event.target.value })} />
+                  </div>
+                  <div className="two-col">
+                    <label>
+                      Category
+                      <select className="input" value={editingProduct.category} onChange={(event) => setEditingProduct({ ...editingProduct, category: event.target.value })}>
+                        {productCategories.map((category) => (
+                          <option key={category} value={category}>{category}</option>
+                        ))}
+                      </select>
+                    </label>
+                    <input className="input" placeholder="Unit" value={editingProduct.unit} onChange={(event) => setEditingProduct({ ...editingProduct, unit: event.target.value })} />
+                  </div>
+                  <div className="two-col">
+                    <NumberField label="Selling price" value={editingProduct.price} onChange={(value) => setEditingProduct({ ...editingProduct, price: value })} />
+                    <NumberField label="Cost price" value={editingProduct.cost} onChange={(value) => setEditingProduct({ ...editingProduct, cost: value })} />
+                  </div>
+                  <div className="two-col">
+                    <NumberField label="Stock" value={editingProduct.stock} onChange={(value) => setEditingProduct({ ...editingProduct, stock: value })} />
+                    <NumberField label="Reorder level" value={editingProduct.reorderLevel} onChange={(value) => setEditingProduct({ ...editingProduct, reorderLevel: value })} />
+                  </div>
+                  <label>
+                    Expiry date
+                    <input className="input" type="date" value={editingProduct.expiryDate} onChange={(event) => setEditingProduct({ ...editingProduct, expiryDate: event.target.value })} />
+                  </label>
+                  <div className="product-dashboard-actions">
+                    <button className="primary-button">Save Product</button>
+                    <button type="button" className="secondary-button" onClick={() => setEditingProduct(emptyProduct())}>Clear Form</button>
+                  </div>
+                </form>
+              </div>
             )}
           </section>
         )}
 
-        {activeTab === "sales" && (
+        {activeTab === "categories" && (
+          <section className="category-page">
+            <div className="report-grid">
+              <Metric label="Categories with products" value={String(categorySummaries.filter((category) => category.productCount > 0).length)} />
+              <Metric label="Total Products" value={String(store.products.length)} />
+              {isAdmin && <Metric label="Total Cost Value" value={money(metrics.inventoryValue, store.settings.currency)} />}
+              <Metric label="Total Selling Value" value={money(metrics.inventorySellingValue, store.settings.currency)} />
+            </div>
+            <p>Current stock by category. Products counts distinct items; stock on hand shows quantities separately for each unit. Values are for stock remaining, not sales.</p>
+            <DataTable
+              title="Stock by Category"
+              headers={["Category", "Products", "Stock on Hand", ...(isAdmin ? ["Cost Value"] : []), "Selling Value"]}
+              rows={categorySummaries.map((category) => [
+                category.name,
+                category.productCount,
+                [...category.quantities].sort(([a], [b]) => a.localeCompare(b)).map(([unit, quantity]) => `${quantity.toLocaleString()} ${unit}`).join(", ") || "0",
+                ...(isAdmin ? [money(category.costValue, store.settings.currency)] : []),
+                money(category.sellingValue, store.settings.currency),
+              ])}
+            />
+          </section>
+        )}
+
+        {(activeTab === "sales" || activeTab === "sales-category") && (
           <section className="sales-report-page">
             <div className="report-filter-panel">
               <div className="panel-heading">
                 <div>
-                  <h2>Sales Reports</h2>
-                  <p>Select any day or period to view receipts and profit.</p>
+                  <h2>{activeTab === "sales-category" ? "Sales Category" : "Sales Reports"}</h2>
+                  <p>{activeTab === "sales-category" ? "Select any day or period to view sales and quantities by category." : "Select any day or period to view receipts and profit."}</p>
                 </div>
                 <strong>{filteredSales.length} receipts</strong>
               </div>
@@ -1641,7 +1687,22 @@ export default function Home() {
                 </span>
               ))}
             </div>
+            {activeTab === "sales-category" && <>
             <DataTable
+              title="Sales by Category"
+              headers={["Category", "Receipts", "Products Sold", "Quantity Sold", "Sales", ...(isAdmin ? ["Cost", "Gross Profit"] : [])]}
+              rows={categorySales.map((category) => [
+                category.name,
+                category.receipts.size,
+                category.products.size,
+                [...category.quantities].map(([unit, quantity]) => `${quantity.toLocaleString()} ${unit}`).join(", ") || "Not recorded",
+                money(category.sales, store.settings.currency),
+                ...(isAdmin ? [money(category.cost, store.settings.currency), money(category.sales - category.cost, store.settings.currency)] : []),
+              ])}
+            />
+            <p className="category-report-note">Uses the selected dates and current product categories. Deleted or uncategorized products appear under Uncategorized. Receipt discounts are shared proportionally; a receipt containing several categories is counted in each.</p>
+            </>}
+            {activeTab === "sales" && <DataTable
               title="Sales History"
               headers={isAdmin ? ["Receipt", "Time", "Customer", "Payment", "Total", "Profit", "Action"] : ["Receipt", "Time", "Customer", "Payment", "Total", "Action"]}
               rows={filteredSales.map((sale) => [
@@ -1675,7 +1736,7 @@ export default function Home() {
                   </button>,
                 ]),
               ])}
-            />
+            />}
           </section>
         )}
 
@@ -1875,102 +1936,6 @@ function Metric({ label, value }: { label: string; value: string }) {
   );
 }
 
-const ProductTile = memo(function ProductTile({
-  product,
-  currency,
-  onAdd,
-}: {
-  product: Product;
-  currency: string;
-  onAdd: (product: Product) => void;
-}) {
-  return (
-    <button
-      className="product-tile"
-      onClick={() => onAdd(product)}
-      disabled={product.stock <= 0}
-    >
-      <span className="category-chip">{product.category}</span>
-      <strong>{product.name}</strong>
-      <span>{product.sku || product.barcode}</span>
-      <span className="tile-row">
-        <b>{money(product.price, currency)}</b>
-        <em>{product.stock} {product.unit}</em>
-      </span>
-    </button>
-  );
-});
-
-const ProductForm = memo(function ProductForm({
-  initialProduct,
-  isExisting,
-  onClose,
-  onSave,
-}: {
-  initialProduct: Product;
-  isExisting: boolean;
-  onClose: () => void;
-  onSave: (product: Product) => void;
-}) {
-  const [draft, setDraft] = useState(initialProduct);
-
-  const updateDraft = useCallback((updates: Partial<Product>) => {
-    setDraft((current) => ({ ...current, ...updates }));
-  }, []);
-
-  return (
-    <div className="product-modal" role="dialog" aria-modal="true" aria-labelledby="product-form-title">
-      <form
-        className="form-panel product-dashboard"
-        onSubmit={(event) => {
-          event.preventDefault();
-          onSave(draft);
-        }}
-      >
-        <div className="product-dashboard-header">
-          <div>
-            <h2 id="product-form-title">{isExisting ? "Edit Product" : "Add Product"}</h2>
-            <p>Product dashboard</p>
-          </div>
-          <button type="button" className="icon-button" onClick={onClose} title="Close product form">x</button>
-        </div>
-        <input className="input" placeholder="Product name" value={draft.name} onChange={(event) => updateDraft({ name: event.target.value })} />
-        <div className="two-col">
-          <input className="input" placeholder="SKU" value={draft.sku} onChange={(event) => updateDraft({ sku: event.target.value })} />
-          <input className="input" placeholder="Barcode" value={draft.barcode} onChange={(event) => updateDraft({ barcode: event.target.value })} />
-        </div>
-        <div className="two-col">
-          <label>
-            Category
-            <select className="input" value={draft.category} onChange={(event) => updateDraft({ category: event.target.value })}>
-              {productCategories.map((category) => (
-                <option key={category} value={category}>{category}</option>
-              ))}
-            </select>
-          </label>
-          <input className="input" placeholder="Unit" value={draft.unit} onChange={(event) => updateDraft({ unit: event.target.value })} />
-        </div>
-        <div className="two-col">
-          <NumberField label="Selling price" value={draft.price} onChange={(value) => updateDraft({ price: value })} />
-          <NumberField label="Cost price" value={draft.cost} onChange={(value) => updateDraft({ cost: value })} />
-        </div>
-        <div className="two-col">
-          <NumberField label="Stock" value={draft.stock} onChange={(value) => updateDraft({ stock: value })} />
-          <NumberField label="Reorder level" value={draft.reorderLevel} onChange={(value) => updateDraft({ reorderLevel: value })} />
-        </div>
-        <label>
-          Expiry date
-          <input className="input" type="date" value={draft.expiryDate} onChange={(event) => updateDraft({ expiryDate: event.target.value })} />
-        </label>
-        <div className="product-dashboard-actions">
-          <button className="primary-button">Save Product</button>
-          <button type="button" className="secondary-button" onClick={() => setDraft(emptyProduct())}>Clear Form</button>
-        </div>
-      </form>
-    </div>
-  );
-});
-
 function NumberField({ label, value, onChange }: { label: string; value: number; onChange: (value: number) => void }) {
   return (
     <label>
@@ -1984,32 +1949,65 @@ const SearchField = memo(function SearchField({
   ariaLabel,
   className,
   placeholder,
-  initialValue,
+  value,
   onSearch,
 }: {
   ariaLabel: string;
   className: string;
   placeholder: string;
-  initialValue: string;
+  value: string;
   onSearch: (value: string) => void;
 }) {
-  const [draft, setDraft] = useState(initialValue);
-
-  useEffect(() => {
-    const timer = setTimeout(() => onSearch(draft), 90);
-    return () => clearTimeout(timer);
-  }, [draft, onSearch]);
-
   return (
     <input
       aria-label={ariaLabel}
       className={className}
       placeholder={placeholder}
-      value={draft}
-      onChange={(event) => setDraft(event.target.value)}
+      value={value}
+      onChange={(event) => onSearch(event.target.value)}
     />
   );
 });
+
+// Keep DOM and formatting work bounded even when an empty or broad search
+// matches the entire catalog. A new search remounts this component on page one.
+const productPageSize = 60;
+function ProductResults({ products, className, label, children }: {
+  products: Product[];
+  className: string;
+  label: string;
+  children: (product: Product) => ReactNode;
+}) {
+  const [requestedPage, setPage] = useState(0);
+  const pageCount = Math.max(1, Math.ceil(products.length / productPageSize));
+  const page = Math.min(requestedPage, pageCount - 1);
+  const start = page * productPageSize;
+  const listRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    listRef.current?.scrollTo(0, 0);
+  }, [page]);
+
+  return (
+    <div className="product-results">
+      <div className="product-pagination" aria-label={`${label} pagination`}>
+        <span role="status">
+          {products.length === 0 ? "0 products" : `${start + 1}–${Math.min(start + productPageSize, products.length)} of ${products.length} products`}
+        </span>
+        {pageCount > 1 && (
+          <>
+            <button type="button" className="table-action" disabled={page === 0} onClick={() => setPage(page - 1)}>Previous</button>
+            <button type="button" className="table-action" disabled={page === pageCount - 1} onClick={() => setPage(page + 1)}>Next</button>
+          </>
+        )}
+      </div>
+      <div ref={listRef} className={className} aria-label={label}>
+        {products.length === 0 && <p className="empty inventory-empty">No products found.</p>}
+        {products.slice(start, start + productPageSize).map(children)}
+      </div>
+    </div>
+  );
+}
 
 function Totals({
   currency,
