@@ -2010,7 +2010,7 @@ export default function Home() {
         <div className="receipt-card">
           <div className="receipt-actions">
             <div>
-              <h2 id="receipt-title">Sale Details</h2>
+              <h2 id="receipt-title">Customer Receipt</h2>
               <p>{lastReceipt.receiptNo}</p>
             </div>
             <button className="icon-button" onClick={() => setLastReceipt(null)} title="Close receipt">x</button>
@@ -2020,7 +2020,7 @@ export default function Home() {
             <span><b>Items</b>{lastReceipt.items.reduce((sum, item) => sum + item.qty, 0)}</span>
             <span><b>Payment</b>{lastReceipt.paymentMethod}</span>
           </div>
-          <Receipt sale={lastReceipt} footer={store.settings.receiptFooter} currency={store.settings.currency} showProfit={isAdmin} />
+          <Receipt sale={lastReceipt} footer={store.settings.receiptFooter} currency={store.settings.currency} />
           <div className="receipt-actions bottom">
             <button className="secondary-button" onClick={() => setLastReceipt(null)}>Close</button>
             <button className="primary-button compact" onClick={() => window.print()}>Print Receipt</button>
@@ -2151,27 +2151,30 @@ function Totals({
   );
 }
 
-function Receipt({ sale, footer, currency, showProfit = false }: { sale: Sale; footer: string; currency: string; showProfit?: boolean }) {
+function Receipt({ sale, footer, currency }: { sale: Sale; footer: string; currency: string }) {
   const itemCount = sale.items.reduce((sum, item) => sum + item.qty, 0);
 
   return (
     <div className="receipt">
       <div className="receipt-title">
-        <h3>{sale.receiptNo}</h3>
-        <p>{new Date(sale.createdAt).toLocaleString()}</p>
+        <h3>PA GERRY POS</h3>
+        <p>Official Sales Receipt</p>
       </div>
       <div className="receipt-detail-grid">
+        <span><b>Receipt</b>{sale.receiptNo}</span>
+        <span><b>Date</b>{new Date(sale.createdAt).toLocaleString()}</span>
         <span><b>Customer</b>{sale.customer}</span>
         <span><b>Payment</b>{sale.paymentMethod}</span>
         <span><b>Items</b>{itemCount}</span>
+        <span><b>Cashier</b>{sale.cashier}</span>
       </div>
       <div className="receipt-items">
-        <strong>Products</strong>
+        <strong>Items Purchased</strong>
         {sale.items.map((item) => (
           <div className="receipt-item" key={`${sale.id}-${item.productId}`}>
             <div>
               <em>{item.name || "Unnamed product"}</em>
-              <small>Qty {item.qty} x {money(item.price, currency)}{item.discount > 0 ? ` - ${money(item.discount, currency)} discount` : ""}</small>
+              <small>{item.qty} x {money(item.price, currency)}{item.discount > 0 ? ` less ${money(item.discount, currency)} discount` : ""}</small>
             </div>
             <b>{money(item.qty * item.price - item.discount, currency)}</b>
           </div>
@@ -2180,11 +2183,9 @@ function Receipt({ sale, footer, currency, showProfit = false }: { sale: Sale; f
       <div className="receipt-total-list">
         <span><b>Subtotal</b>{money(sale.subtotal, currency)}</span>
         <span><b>Discount</b>{money(sale.discount, currency)}</span>
-        {showProfit && <span><b>Cost</b>{money(sale.cogs, currency)}</span>}
-        {showProfit && <span><b>Profit</b>{money(sale.grossProfit, currency)}</span>}
-        <strong><b>Total</b>{money(sale.total, currency)}</strong>
+        <strong><b>Total Paid</b>{money(sale.total, currency)}</strong>
       </div>
-      <small>{footer}</small>
+      <small className="receipt-footer">{footer}</small>
     </div>
   );
 }

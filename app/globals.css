@@ -1088,12 +1088,13 @@ textarea:focus {
 
 .receipt {
   display: grid;
-  gap: 0.65rem;
-  border: 1px dashed #3e6b91;
+  gap: 0.7rem;
+  border: 1px solid #d6dee8;
   border-radius: 8px;
   margin-top: 0.55rem;
-  background: #102a42;
-  padding: 0.75rem;
+  background: #f8fbff;
+  color: #132333;
+  padding: 1rem;
   font-size: 0.9rem;
   font-weight: 850;
 }
@@ -1151,8 +1152,8 @@ textarea:focus {
 
 .receipt-detail-grid {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 0.35rem;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.4rem;
 }
 
 .receipt-detail-grid span,
@@ -1160,27 +1161,47 @@ textarea:focus {
   display: flex;
   justify-content: space-between;
   gap: 0.75rem;
+  border: 1px solid #e3e9f0;
+  border-radius: 6px;
+  background: #ffffff;
+  padding: 0.42rem 0.5rem;
 }
 
 .receipt-detail-grid b,
 .receipt > span b {
-  color: #93abc4;
+  color: #50677d;
 }
 
 .receipt-title {
   display: grid;
   gap: 0.15rem;
+  border-bottom: 1px solid #dce5ee;
+  padding-bottom: 0.65rem;
+  text-align: center;
+}
+
+.receipt-title h3 {
+  color: #081827;
+  font-size: 1.45rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.receipt-title p {
+  color: #50677d;
+  font-size: 0.88rem;
+  font-weight: 900;
 }
 
 .receipt-items {
   display: grid;
   gap: 0.45rem;
-  border-block: 1px solid #1e4160;
+  border-block: 1px solid #dce5ee;
   padding-block: 0.65rem;
 }
 
 .receipt-items > strong {
-  color: #f3f8ff;
+  color: #132333;
   font-size: 0.78rem;
   text-transform: uppercase;
 }
@@ -1190,10 +1211,10 @@ textarea:focus {
   grid-template-columns: minmax(0, 1fr) auto;
   gap: 0.45rem 0.75rem;
   align-items: center;
-  border: 1px solid #1e4160;
+  border: 1px solid #e3e9f0;
   border-radius: 6px;
-  background: #0d2235;
-  padding: 0.6rem;
+  background: #ffffff;
+  padding: 0.62rem;
 }
 
 .receipt-item div {
@@ -1203,7 +1224,7 @@ textarea:focus {
 }
 
 .receipt-item em {
-  color: #f3f8ff;
+  color: #132333;
   font-size: 1rem;
   font-weight: 950;
   font-style: normal;
@@ -1211,13 +1232,13 @@ textarea:focus {
 }
 
 .receipt-item small {
-  color: #93abc4;
+  color: #50677d;
   font-size: 0.78rem;
   font-weight: 900;
 }
 
 .receipt-item b {
-  color: #ffffff;
+  color: #132333;
   font-size: 0.95rem;
   white-space: nowrap;
 }
@@ -1235,14 +1256,24 @@ textarea:focus {
 }
 
 .receipt-total-list strong {
-  border-top: 1px solid #1e4160;
-  color: #ffffff;
-  font-size: 1.08rem;
-  padding-top: 0.45rem;
+  border: 1px solid #1976d2;
+  border-radius: 6px;
+  background: #eaf4ff;
+  color: #081827;
+  font-size: 1.15rem;
+  margin-top: 0.15rem;
+  padding: 0.55rem 0.65rem;
 }
 
 .receipt-total-list b {
-  color: #93abc4;
+  color: #50677d;
+}
+
+.receipt-footer {
+  border-top: 1px solid #dce5ee;
+  color: #50677d;
+  padding-top: 0.6rem;
+  text-align: center;
 }
 
 .customer-display-page {
