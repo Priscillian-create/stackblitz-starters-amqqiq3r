@@ -126,6 +126,7 @@ const productCategories = [
   "Drinks",
   "Provisions",
   "Foodstuffs",
+  "Drugs",
   "Cosmetics",
   "Household",
   "Snacks",
