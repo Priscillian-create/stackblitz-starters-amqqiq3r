@@ -137,6 +137,7 @@ type CustomerDisplaySnapshot = {
 const storageKey = "pa-gerrys-mart-pos-v2";
 const authStorageKey = "pa-gerrys-mart-auth-v1";
 const customerDisplayStorageKey = "pa-gerrys-mart-customer-display-v1";
+const pendingSyncStorageKey = "pa-gerrys-mart-pending-sync-v1";
 const fallbackSupabaseConfig: SupabaseConfig = {
   url: "https://vxvbwrzlypykidpkewsk.supabase.co",
   anonKey:
@@ -268,6 +269,11 @@ const normalizeStore = (store: StoreState): StoreState => ({
 
 const sameJson = (left: unknown, right: unknown) => JSON.stringify(left) === JSON.stringify(right);
 
+const hasPendingSync = () => {
+  if (typeof window === "undefined") return false;
+  return window.localStorage.getItem(pendingSyncStorageKey) === "true";
+};
+
 const isCustomerDisplayUrl = () => {
   if (typeof window === "undefined") return false;
   const params = new URLSearchParams(window.location.search);
@@ -368,6 +374,7 @@ export default function Home() {
     } catch {
       window.localStorage.removeItem(storageKey);
     }
+    hasUnsyncedWritesRef.current = hasPendingSync();
     setLocalReady(true);
   }, []);
 
@@ -471,7 +478,8 @@ export default function Home() {
         syncBusyRef.current = true;
         try {
           if (pushFirst || hasUnsyncedWritesRef.current) {
-            await pushLocalToSupabase();
+            const pushed = await pushLocalToSupabase();
+            if (!pushed) return;
           }
           await loadFromSupabase();
         } finally {
@@ -511,6 +519,7 @@ export default function Home() {
     hasUnsyncedWritesRef.current = true;
     pendingWriteRef.current = true;
     blockPullUntilRef.current = Date.now() + blockMs;
+    window.localStorage.setItem(pendingSyncStorageKey, "true");
   }
 
   function protectProducts(productIds: string[]) {
@@ -696,6 +705,7 @@ export default function Home() {
         itemsBySale.set(item.sale_id, [...(itemsBySale.get(item.sale_id) ?? []), item]);
       });
       const localProductsById = new Map(storeRef.current.products.map((product) => [product.id, product]));
+      const keepLocalProducts = hasUnsyncedWritesRef.current || hasPendingSync();
       const mergedProducts = products
         .map(productFromRow)
         .filter((product) => !deletedProductIdsRef.current.has(product.id))
@@ -704,6 +714,13 @@ export default function Home() {
             ? localProductsById.get(product.id)!
             : product
         ));
+      if (keepLocalProducts) {
+        localProductsById.forEach((product, id) => {
+          if (!deletedProductIdsRef.current.has(id) && !mergedProducts.some((item) => item.id === id)) {
+            mergedProducts.unshift(product);
+          }
+        });
+      }
       protectedProductIdsRef.current.forEach((id) => {
         if (!deletedProductIdsRef.current.has(id) && !mergedProducts.some((product) => product.id === id)) {
           const localProduct = localProductsById.get(id);
@@ -765,11 +782,17 @@ export default function Home() {
         ),
       );
       hasUnsyncedWritesRef.current = false;
+      pendingWriteRef.current = false;
+      window.localStorage.removeItem(pendingSyncStorageKey);
       protectedProductIdsRef.current.clear();
       blockPullUntilRef.current = Math.max(blockPullUntilRef.current, Date.now() + 5000);
       setSyncStatus("Local data pushed to Supabase");
+      return true;
     } catch (error) {
       setSyncStatus(error instanceof Error ? `Supabase push failed: ${error.message}` : "Supabase push failed");
+      pendingWriteRef.current = false;
+      window.localStorage.setItem(pendingSyncStorageKey, "true");
+      return false;
     }
   }
 
