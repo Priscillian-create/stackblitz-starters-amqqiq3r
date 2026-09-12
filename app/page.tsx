@@ -305,7 +305,7 @@ export default function Home() {
   const [analyticsEnd, setAnalyticsEnd] = useState(inputDate());
   const [installPrompt, setInstallPrompt] = useState<BeforeInstallPromptEvent | null>(null);
   const [isAppInstalled, setIsAppInstalled] = useState(false);
-  const [isCustomerDisplay] = useState(isCustomerDisplayUrl);
+  const [isCustomerDisplay, setIsCustomerDisplay] = useState(false);
   const [customerDisplay, setCustomerDisplay] = useState<CustomerDisplaySnapshot | null>(null);
   const syncTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const storageTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -317,6 +317,10 @@ export default function Home() {
   const protectedProductIdsRef = useRef(new Set<string>());
   const deletedProductIdsRef = useRef(new Set<string>());
   const deletedSaleIdsRef = useRef(new Set<string>());
+
+  useEffect(() => {
+    setIsCustomerDisplay(isCustomerDisplayUrl());
+  }, []);
 
   useEffect(() => {
     if (!isCustomerDisplay) return;
