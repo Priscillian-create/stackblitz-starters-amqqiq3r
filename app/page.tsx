@@ -114,8 +114,29 @@ type BeforeInstallPromptEvent = Event & {
   userChoice: Promise<{ outcome: "accepted" | "dismissed"; platform: string }>;
 };
 
+type CustomerDisplaySnapshot = {
+  updatedAt: string;
+  cashier: string;
+  customer: string;
+  currency: string;
+  itemCount: number;
+  items: Array<{
+    productId: string;
+    name: string;
+    qty: number;
+    unit: string;
+    price: number;
+    discount: number;
+    lineTotal: number;
+  }>;
+  subtotal: number;
+  discount: number;
+  total: number;
+};
+
 const storageKey = "pa-gerrys-mart-pos-v2";
 const authStorageKey = "pa-gerrys-mart-auth-v1";
+const customerDisplayStorageKey = "pa-gerrys-mart-customer-display-v1";
 const fallbackSupabaseConfig: SupabaseConfig = {
   url: "https://vxvbwrzlypykidpkewsk.supabase.co",
   anonKey:
@@ -247,6 +268,12 @@ const normalizeStore = (store: StoreState): StoreState => ({
 
 const sameJson = (left: unknown, right: unknown) => JSON.stringify(left) === JSON.stringify(right);
 
+const isCustomerDisplayUrl = () => {
+  if (typeof window === "undefined") return false;
+  const params = new URLSearchParams(window.location.search);
+  return params.has("customerDisplay") || params.get("display") === "customer";
+};
+
 export default function Home() {
   const [store, setStore] = useState<StoreState>(initialState);
   const [supabaseConfig, setSupabaseConfig] = useState<SupabaseConfig>({
@@ -278,6 +305,8 @@ export default function Home() {
   const [analyticsEnd, setAnalyticsEnd] = useState(inputDate());
   const [installPrompt, setInstallPrompt] = useState<BeforeInstallPromptEvent | null>(null);
   const [isAppInstalled, setIsAppInstalled] = useState(false);
+  const [isCustomerDisplay] = useState(isCustomerDisplayUrl);
+  const [customerDisplay, setCustomerDisplay] = useState<CustomerDisplaySnapshot | null>(null);
   const syncTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const storageTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const storeRef = useRef<StoreState>(initialState);
@@ -288,6 +317,33 @@ export default function Home() {
   const protectedProductIdsRef = useRef(new Set<string>());
   const deletedProductIdsRef = useRef(new Set<string>());
   const deletedSaleIdsRef = useRef(new Set<string>());
+
+  useEffect(() => {
+    if (!isCustomerDisplay) return;
+
+    const loadCustomerDisplay = () => {
+      try {
+        const saved = window.localStorage.getItem(customerDisplayStorageKey);
+        setCustomerDisplay(saved ? JSON.parse(saved) as CustomerDisplaySnapshot : null);
+      } catch {
+        setCustomerDisplay(null);
+      }
+    };
+
+    loadCustomerDisplay();
+    const interval = window.setInterval(loadCustomerDisplay, 500);
+    const handleStorage = (event: StorageEvent) => {
+      if (event.key === customerDisplayStorageKey) {
+        loadCustomerDisplay();
+      }
+    };
+
+    window.addEventListener("storage", handleStorage);
+    return () => {
+      window.clearInterval(interval);
+      window.removeEventListener("storage", handleStorage);
+    };
+  }, [isCustomerDisplay]);
 
   useEffect(() => {
     const savedAuth = window.localStorage.getItem(authStorageKey);
@@ -889,6 +945,42 @@ export default function Home() {
   const totalDiscount = Math.min(saleDiscount + cartTotals.lineDiscounts, cartTotals.subtotal);
   const grandTotal = Math.max(0, cartTotals.subtotal - totalDiscount);
   const grossProfit = grandTotal - cartTotals.cogs;
+  const customerDisplaySnapshot = useMemo<CustomerDisplaySnapshot>(() => {
+    const items = cart
+      .map((line) => {
+        const product = productsById.get(line.productId);
+        if (!product) return null;
+        const lineSubtotal = product.price * line.qty;
+        const lineDiscount = Math.min(line.discount, lineSubtotal);
+        return {
+          productId: line.productId,
+          name: product.name,
+          qty: line.qty,
+          unit: product.unit,
+          price: product.price,
+          discount: lineDiscount,
+          lineTotal: Math.max(0, lineSubtotal - lineDiscount),
+        };
+      })
+      .filter((item): item is CustomerDisplaySnapshot["items"][number] => Boolean(item));
+
+    return {
+      updatedAt: new Date().toISOString(),
+      cashier: store.settings.cashier,
+      customer: selectedCustomer,
+      currency: store.settings.currency,
+      itemCount: items.reduce((sum, item) => sum + item.qty, 0),
+      items,
+      subtotal: cartTotals.subtotal,
+      discount: totalDiscount,
+      total: grandTotal,
+    };
+  }, [cart, cartTotals.subtotal, grandTotal, productsById, selectedCustomer, store.settings.cashier, store.settings.currency, totalDiscount]);
+
+  useEffect(() => {
+    if (!localReady || isCustomerDisplay) return;
+    window.localStorage.setItem(customerDisplayStorageKey, JSON.stringify(customerDisplaySnapshot));
+  }, [customerDisplaySnapshot, isCustomerDisplay, localReady]);
 
   const metrics = useMemo(() => {
     const today = new Date().toISOString().slice(0, 10);
@@ -1256,6 +1348,16 @@ export default function Home() {
     reader.readAsText(file);
   }
 
+  function openCustomerDisplay() {
+    const url = `${window.location.origin}${window.location.pathname}?customerDisplay=1`;
+    const displayWindow = window.open(url, "pa-gerry-customer-display", "popup=yes,width=960,height=720");
+    if (!displayWindow) {
+      window.alert("Please allow pop-ups, then open the customer display again.");
+      return;
+    }
+    displayWindow.focus();
+  }
+
   const tabs = [
     { key: "register", label: "Point of Sale", note: "Sell items", icon: "POS" },
     { key: "inventory", label: "Inventory", note: "Products and stock", icon: "INV" },
@@ -1269,6 +1371,10 @@ export default function Home() {
   ];
   const activeTabMeta = tabs.find((tab) => tab.key === activeTab) ?? tabs[0];
   const isAdmin = store.settings.userRole === "Admin";
+
+  if (isCustomerDisplay) {
+    return <CustomerDisplay snapshot={customerDisplay} />;
+  }
 
   if (!authSession) {
     return (
@@ -1412,7 +1518,10 @@ export default function Home() {
                   <h3>Current Sale</h3>
                   <p>{cart.length} item lines</p>
                 </div>
-                <button className="icon-button" onClick={() => setCart([])} title="Clear cart">Clear</button>
+                <div className="cart-heading-actions">
+                  <button className="table-action" onClick={openCustomerDisplay}>Customer Display</button>
+                  <button className="icon-button" onClick={() => setCart([])} title="Clear cart">Clear</button>
+                </div>
               </div>
 
               <div className="cart-lines">
@@ -2073,6 +2182,72 @@ function Receipt({ sale, footer, currency, showProfit = false }: { sale: Sale; f
       </div>
       <small>{footer}</small>
     </div>
+  );
+}
+
+function CustomerDisplay({ snapshot }: { snapshot: CustomerDisplaySnapshot | null }) {
+  const currency = snapshot?.currency ?? "NGN";
+  const itemCount = snapshot?.itemCount ?? 0;
+  const items = snapshot?.items ?? [];
+  const updatedAt = snapshot ? new Date(snapshot.updatedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "";
+
+  return (
+    <main className="customer-display-page">
+      <section className="customer-display-shell">
+        <header className="customer-display-header">
+          <div>
+            <p>PA GERRY POS</p>
+            <h1>Checkout</h1>
+          </div>
+          <span>{updatedAt ? `Updated ${updatedAt}` : "Waiting for cashier"}</span>
+        </header>
+
+        <div className="customer-display-main">
+          <div className="customer-display-items" aria-live="polite">
+            {items.length === 0 && (
+              <div className="customer-display-empty">
+                <strong>Welcome</strong>
+                <span>Your items will appear here as they are scanned.</span>
+              </div>
+            )}
+            {items.map((item) => (
+              <div className="customer-display-item" key={item.productId}>
+                <div>
+                  <strong>{item.name}</strong>
+                  <span>{item.qty.toLocaleString()} {item.unit} x {money(item.price, currency)}</span>
+                  {item.discount > 0 && <small>Discount {money(item.discount, currency)}</small>}
+                </div>
+                <b>{money(item.lineTotal, currency)}</b>
+              </div>
+            ))}
+          </div>
+
+          <aside className="customer-display-total">
+            <span>
+              <b>Customer</b>
+              <strong>{snapshot?.customer ?? "Walk-in Customer"}</strong>
+            </span>
+            <span>
+              <b>Items</b>
+              <strong>{itemCount.toLocaleString()}</strong>
+            </span>
+            <span>
+              <b>Subtotal</b>
+              <strong>{money(snapshot?.subtotal ?? 0, currency)}</strong>
+            </span>
+            <span>
+              <b>Discount</b>
+              <strong>{money(snapshot?.discount ?? 0, currency)}</strong>
+            </span>
+            <div>
+              <b>Total to pay</b>
+              <strong>{money(snapshot?.total ?? 0, currency)}</strong>
+            </div>
+            <p>Thank you for shopping with us.</p>
+          </aside>
+        </div>
+      </section>
+    </main>
   );
 }
 
