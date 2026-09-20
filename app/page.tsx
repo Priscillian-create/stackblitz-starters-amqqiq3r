@@ -134,6 +134,26 @@ type CustomerDisplaySnapshot = {
   total: number;
 };
 
+type DisplayScreen = {
+  availLeft?: number;
+  availTop?: number;
+  availWidth?: number;
+  availHeight?: number;
+  left?: number;
+  top?: number;
+  width?: number;
+  height?: number;
+  isInternal?: boolean;
+  isPrimary?: boolean;
+};
+
+type WindowWithScreenDetails = Window & {
+  getScreenDetails?: () => Promise<{
+    currentScreen?: DisplayScreen;
+    screens: DisplayScreen[];
+  }>;
+};
+
 const storageKey = "pa-gerrys-mart-pos-v2";
 const authStorageKey = "pa-gerrys-mart-auth-v1";
 const customerDisplayStorageKey = "pa-gerrys-mart-customer-display-v1";
@@ -1375,13 +1395,40 @@ export default function Home() {
     reader.readAsText(file);
   }
 
-  function openCustomerDisplay() {
+  async function openCustomerDisplay() {
     const url = `${window.location.origin}${window.location.pathname}?customerDisplay=1`;
-    const displayWindow = window.open(url, "pa-gerry-customer-display", "popup=yes,width=960,height=720");
+    const displayWindow = window.open("about:blank", "pa-gerry-customer-display", "popup=yes,width=960,height=720");
     if (!displayWindow) {
       window.alert("Please allow pop-ups, then open the customer display again.");
       return;
     }
+
+    try {
+      const getScreenDetails = (window as WindowWithScreenDetails).getScreenDetails;
+      if (getScreenDetails) {
+        const screenDetails = await getScreenDetails.call(window);
+        const screens = screenDetails.screens ?? [];
+        const currentScreen = screenDetails.currentScreen;
+        const customerScreen =
+          screens.find((screen) => screen !== currentScreen && !screen.isInternal) ??
+          screens.find((screen) => screen !== currentScreen) ??
+          screens.find((screen) => screen.isPrimary === false);
+
+        if (customerScreen) {
+          const left = Math.round(customerScreen.availLeft ?? customerScreen.left ?? 0);
+          const top = Math.round(customerScreen.availTop ?? customerScreen.top ?? 0);
+          const width = Math.round(customerScreen.availWidth ?? customerScreen.width ?? 960);
+          const height = Math.round(customerScreen.availHeight ?? customerScreen.height ?? 720);
+          displayWindow.moveTo(left, top);
+          displayWindow.resizeTo(width, height);
+        }
+      }
+    } catch {
+      // Some POS browsers do not expose screen placement. The cashier can move
+      // the display window once, then leave it open on the customer monitor.
+    }
+
+    displayWindow.location.replace(url);
     displayWindow.focus();
   }
 
