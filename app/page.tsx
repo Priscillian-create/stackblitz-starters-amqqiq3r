@@ -1,6 +1,7 @@
 "use client";
 
 import { FormEvent, ReactNode, memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { AuthSession, createSessionRefresher, needsSessionRefresh, SessionExpiredError } from "./auth-session";
 import { launchCustomerDisplay } from "./customer-screen";
 import { summarizeCategories } from "./category-summary";
 import { summarizeCategorySales } from "./category-sales";
@@ -92,15 +93,6 @@ type SupabaseSaleItem = CartLine & {
   price: number;
   cost: number;
   sku: string;
-};
-
-type AuthSession = {
-  access_token: string;
-  refresh_token?: string;
-  user: {
-    id: string;
-    email?: string;
-  };
 };
 
 type AppUser = {
@@ -314,6 +306,8 @@ export default function Home() {
   const [isAppInstalled, setIsAppInstalled] = useState(false);
   const [isCustomerDisplay, setIsCustomerDisplay] = useState(false);
   const [customerDisplay, setCustomerDisplay] = useState<CustomerDisplaySnapshot | null>(null);
+  const authSessionRef = useRef<AuthSession | null>(null);
+  const refreshSession = useMemo(() => createSessionRefresher(supabaseConfig), [supabaseConfig.url, supabaseConfig.anonKey]);
   const syncTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const storageTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const storeRef = useRef<StoreState>(initialState);
@@ -361,6 +355,7 @@ export default function Home() {
     try {
       if (savedAuth) {
         const session = JSON.parse(savedAuth) as AuthSession;
+        authSessionRef.current = session;
         setAuthSession(session);
         setLoginDraft((current) => ({ ...current, email: session.user.email ?? "" }));
       }
@@ -461,6 +456,21 @@ export default function Home() {
   useEffect(() => {
     if (!authSession || !hasSupabase()) return;
     void loadUserProfile(authSession);
+    const renew = () => {
+      if (navigator.onLine && authSessionRef.current) {
+        void validSession(authSessionRef.current).catch((error) => {
+          setSyncStatus(error instanceof Error ? error.message : "Unable to renew login");
+        });
+      }
+    };
+    const timer = window.setInterval(renew, 30_000);
+    window.addEventListener("online", renew);
+    window.addEventListener("focus", renew);
+    return () => {
+      window.clearInterval(timer);
+      window.removeEventListener("online", renew);
+      window.removeEventListener("focus", renew);
+    };
   }, [authSession, supabaseConfig.url, supabaseConfig.anonKey]);
 
   useEffect(() => {
@@ -532,15 +542,20 @@ export default function Home() {
       throw new Error("Supabase is not configured yet.");
     }
 
-    const response = await fetch(`${supabaseConfig.url}/rest/v1/${path}`, {
+    const send = (token: string) => fetch(`${supabaseConfig.url}/rest/v1/${path}`, {
       ...init,
       headers: {
         apikey: supabaseConfig.anonKey,
-        Authorization: `Bearer ${accessToken || supabaseConfig.anonKey}`,
+        Authorization: `Bearer ${token || supabaseConfig.anonKey}`,
         "Content-Type": "application/json",
         ...(init.headers ?? {}),
       },
     });
+    let response = await send(accessToken);
+    if (response.status === 401 && accessToken !== supabaseConfig.anonKey && authSessionRef.current) {
+      const renewed = await validSession(authSessionRef.current, true);
+      response = await send(renewed.access_token);
+    }
 
     if (!response.ok) {
       const message = await response.text();
@@ -554,16 +569,44 @@ export default function Home() {
     return response.json() as Promise<T>;
   }
 
+  async function validSession(session: AuthSession, force = false): Promise<AuthSession> {
+    const current = authSessionRef.current;
+    if (!current || current.user.id !== session.user.id) throw new SessionExpiredError();
+    if (!force && !needsSessionRefresh(current)) return current;
+    try {
+      const next = await refreshSession(current);
+      // A pending refresh must never undo sign-out or a newer sign-in.
+      if (authSessionRef.current !== current) {
+        if (!authSessionRef.current || authSessionRef.current.user.id !== current.user.id) {
+          throw new SessionExpiredError();
+        }
+        return authSessionRef.current;
+      }
+      authSessionRef.current = next;
+      window.localStorage.setItem(authStorageKey, JSON.stringify(next));
+      setAuthSession(next);
+      return next;
+    } catch (error) {
+      if (error instanceof SessionExpiredError && authSessionRef.current === current) {
+        signOut();
+        setLoginStatus(error.message);
+      }
+      throw error;
+    }
+  }
+
   async function loadUserProfile(session: AuthSession) {
     const email = session.user.email?.toLowerCase();
     if (!email) return;
 
     try {
+      const activeSession = await validSession(session);
       const users = await supabaseRequest<AppUser[]>(
         `app_users?select=*&email=eq.${encodeURIComponent(email)}&limit=1`,
         {},
-        session.access_token,
+        activeSession.access_token,
       );
+      if (authSessionRef.current?.user.id !== session.user.id) return;
       const profile = users[0];
       if (!profile) {
         setStore((current) => ({
@@ -623,11 +666,12 @@ export default function Home() {
       }
 
       const session = (await response.json()) as AuthSession;
+      authSessionRef.current = session;
       setAuthSession(session);
       window.localStorage.setItem(authStorageKey, JSON.stringify(session));
       setLoginDraft({ email: session.user.email ?? loginDraft.email, password: "" });
       setLoginStatus("");
-      await loadUserProfile(session);
+
     } catch (error) {
       setLoginStatus(error instanceof Error ? error.message : "Login failed.");
     } finally {
@@ -636,6 +680,7 @@ export default function Home() {
   }
 
   function signOut() {
+    authSessionRef.current = null;
     setAuthSession(null);
     window.localStorage.removeItem(authStorageKey);
     setStore((current) => ({
@@ -1411,6 +1456,7 @@ export default function Home() {
             <input
               className="input"
               type="email"
+              autoComplete="username"
               value={loginDraft.email}
               onChange={(event) => setLoginDraft({ ...loginDraft, email: event.target.value })}
               placeholder="name@example.com"
