@@ -6,6 +6,7 @@ import { configureCustomerScreens, DisplayScreen, launchCustomerDisplay } from "
 import { summarizeCategories } from "./category-summary";
 import { summarizeCategorySales } from "./category-sales";
 import { loadAllRows } from "./supabase-pagination";
+import { Mutation, SyncJob, SyncQueue, stockMutation } from "./sync-queue";
 
 type Product = {
   id: string;
@@ -132,6 +133,7 @@ const storageKey = "pa-gerrys-mart-pos-v2";
 const authStorageKey = "pa-gerrys-mart-auth-v1";
 const customerDisplayStorageKey = "pa-gerrys-mart-customer-display-v1";
 const pendingSyncStorageKey = "pa-gerrys-mart-pending-sync-v1";
+const mutationQueueStorageKey = "pa-gerrys-mart-mutations-v1";
 const fallbackSupabaseConfig: SupabaseConfig = {
   url: "https://vxvbwrzlypykidpkewsk.supabase.co",
   anonKey:
@@ -318,6 +320,7 @@ export default function Home() {
   const storeRef = useRef<StoreState>(initialState);
   const syncBusyRef = useRef(false);
   const pendingWriteRef = useRef(false);
+  const mutationQueueRef = useRef<SyncQueue | null>(null);
   const blockPullUntilRef = useRef(0);
   const hasUnsyncedWritesRef = useRef(false);
   const protectedProductIdsRef = useRef(new Set<string>());
@@ -375,7 +378,18 @@ export default function Home() {
     } catch {
       window.localStorage.removeItem(storageKey);
     }
-    hasUnsyncedWritesRef.current = hasPendingSync();
+    mutationQueueRef.current = new SyncQueue(window.localStorage.getItem(mutationQueueStorageKey), (json) => window.localStorage.setItem(mutationQueueStorageKey, json));
+    if (hasPendingSync() && !mutationQueueRef.current.jobs.length) {
+      // Preserve legacy offline work for review, but never upload its full inventory.
+      if (saved) window.localStorage.setItem("pa-gerry-legacy-pending-backup", saved);
+      window.localStorage.removeItem(pendingSyncStorageKey);
+    }
+    hasUnsyncedWritesRef.current = mutationQueueRef.current.jobs.length > 0;
+    mutationQueueRef.current.jobs.forEach((job) => {
+      job.productIds.forEach((id) => protectedProductIdsRef.current.add(id));
+      job.deletedProductIds?.forEach((id) => deletedProductIdsRef.current.add(id));
+      job.deletedSaleIds?.forEach((id) => deletedSaleIdsRef.current.add(id));
+    });
     setLocalReady(true);
   }, []);
 
@@ -410,7 +424,7 @@ export default function Home() {
   useEffect(() => {
     if ("serviceWorker" in navigator) {
       navigator.serviceWorker.register("/sw.js").then((registration) => {
-        void registration.update();
+        void registration.update().catch(() => undefined);
       }).catch(() => undefined);
 
       let refreshed = false;
@@ -732,15 +746,6 @@ export default function Home() {
     reorderLevel: product.reorder_level,
   });
 
-  async function upsertRows<T>(table: string, rows: T[]) {
-    if (!rows.length) return;
-    await supabaseRequest(`${table}?on_conflict=id`, {
-      method: "POST",
-      headers: { Prefer: "resolution=merge-duplicates" },
-      body: JSON.stringify(rows),
-    });
-  }
-
   async function loadFromSupabase() {
     if (pendingWriteRef.current || Date.now() < blockPullUntilRef.current) return;
     try {
@@ -756,7 +761,6 @@ export default function Home() {
         itemsBySale.set(item.sale_id, [...(itemsBySale.get(item.sale_id) ?? []), item]);
       });
       const localProductsById = new Map(storeRef.current.products.map((product) => [product.id, product]));
-      const keepLocalProducts = hasUnsyncedWritesRef.current || hasPendingSync();
       const mergedProducts = products
         .map(productFromRow)
         .filter((product) => !deletedProductIdsRef.current.has(product.id))
@@ -765,13 +769,6 @@ export default function Home() {
             ? localProductsById.get(product.id)!
             : product
         ));
-      if (keepLocalProducts) {
-        localProductsById.forEach((product, id) => {
-          if (!deletedProductIdsRef.current.has(id) && !mergedProducts.some((item) => item.id === id)) {
-            mergedProducts.unshift(product);
-          }
-        });
-      }
       protectedProductIdsRef.current.forEach((id) => {
         if (!deletedProductIdsRef.current.has(id) && !mergedProducts.some((product) => product.id === id)) {
           const localProduct = localProductsById.get(id);
@@ -814,158 +811,98 @@ export default function Home() {
     }
   }
 
+  function queueChanges(job: Omit<SyncJob, "id">) {
+    if (!mutationQueueRef.current) throw new Error("Local storage is not ready.");
+    mutationQueueRef.current.enqueue({ ...job, id: crypto.randomUUID() });
+    markLocalWrite();
+    return pushLocalToSupabase();
+  }
+
+  const rowMutation = (table: string, rows: unknown[]): Mutation => ({
+    path: `${table}?on_conflict=id`, method: "POST", body: rows,
+  });
+
   async function pushLocalToSupabase() {
-    try {
-      const currentStore = storeRef.current;
-      setSyncStatus("Pushing local data...");
-      await upsertRows("products", currentStore.products.map(productToRow));
-      await upsertRows("customers", currentStore.customers);
-      await upsertRows("expenses", currentStore.expenses);
-      await upsertRows("sales", currentStore.sales.map(({ items: _items, ...sale }) => sale));
-      await upsertRows(
-        "sale_items",
-        currentStore.sales.flatMap((sale) =>
-          sale.items.map((item) => ({
-            id: `${sale.id}-${item.productId}`,
-            sale_id: sale.id,
-            ...item,
-          })),
-        ),
-      );
+    const queue = mutationQueueRef.current;
+    if (!queue || !queue.jobs.length) {
       hasUnsyncedWritesRef.current = false;
       pendingWriteRef.current = false;
       window.localStorage.removeItem(pendingSyncStorageKey);
-      protectedProductIdsRef.current.clear();
-      blockPullUntilRef.current = Math.max(blockPullUntilRef.current, Date.now() + 5000);
-      setSyncStatus("Local data pushed to Supabase");
+      return true;
+    }
+    if (!hasSupabase() || !navigator.onLine) {
+      pendingWriteRef.current = false;
+      setSyncStatus("Offline changes queued");
+      return false;
+    }
+    try {
+      setSyncStatus("Syncing changed records...");
+      await queue.flush((mutation) => supabaseRequest(mutation.path, {
+        method: mutation.method,
+        headers: { Prefer: mutation.method === "POST" ? "resolution=merge-duplicates,return=representation" : "return=representation" },
+        ...(mutation.body === undefined ? {} : { body: JSON.stringify(mutation.body) }),
+      }));
+      hasUnsyncedWritesRef.current = queue.jobs.length > 0;
+      pendingWriteRef.current = false;
+      if (!queue.jobs.length) {
+        window.localStorage.removeItem(pendingSyncStorageKey);
+        protectedProductIdsRef.current.clear();
+        deletedProductIdsRef.current.clear();
+        deletedSaleIdsRef.current.clear();
+      }
+      blockPullUntilRef.current = 0;
+      setSyncStatus("Changes synced");
       return true;
     } catch (error) {
-      setSyncStatus(error instanceof Error ? `Supabase push failed: ${error.message}` : "Supabase push failed");
       pendingWriteRef.current = false;
-      window.localStorage.setItem(pendingSyncStorageKey, "true");
+      setSyncStatus(error instanceof Error ? `Sync needs attention: ${error.message}` : "Pending changes kept locally");
       return false;
     }
   }
 
-  async function persistProduct(product: Product) {
-    markLocalWrite();
-    if (!hasSupabase()) {
-      pendingWriteRef.current = false;
-      return;
-    }
-    try {
-      await upsertRows("products", [productToRow(product)]);
-      protectedProductIdsRef.current.delete(product.id);
-      setSyncStatus("Product saved to Supabase");
-    } catch (error) {
-      setSyncStatus(error instanceof Error ? `Product saved locally: ${error.message}` : "Product saved locally");
-    } finally {
-      pendingWriteRef.current = false;
-    }
+  async function persistProduct(product: Product, previous?: Product) {
+    const previousRow = previous ? productToRow(previous) : undefined;
+    const editedFields = Object.fromEntries(Object.entries(productToRow(product)).filter(([key, value]) =>
+      key !== "id" && (!previousRow || !sameJson(value, previousRow[key as keyof SupabaseProduct])),
+    ));
+    const mutation: Mutation = previous ? {
+      path: `products?id=eq.${encodeURIComponent(product.id)}&stock=eq.${previous.stock}&price=eq.${previous.price}&cost=eq.${previous.cost}`,
+      method: "PATCH", body: editedFields, requireMatch: true,
+    } : rowMutation("products", [productToRow(product)]);
+    return queueChanges({ productIds: [product.id], mutations: [mutation] });
   }
 
   async function deleteProductFromSupabase(product: Product) {
-    markLocalWrite();
-    if (!hasSupabase()) {
-      pendingWriteRef.current = false;
-      return;
-    }
-    try {
-      await supabaseRequest(`products?id=eq.${encodeURIComponent(product.id)}`, {
-        method: "DELETE",
-        headers: { Prefer: "return=minimal" },
-      });
-      deletedProductIdsRef.current.delete(product.id);
-      protectedProductIdsRef.current.delete(product.id);
-      setSyncStatus("Product deleted from Supabase");
-    } catch (error) {
-      setSyncStatus(error instanceof Error ? `Product deleted locally: ${error.message}` : "Product deleted locally");
-    } finally {
-      pendingWriteRef.current = false;
-    }
+    return queueChanges({ productIds: [], deletedProductIds: [product.id], mutations: [{
+      path: `products?id=eq.${encodeURIComponent(product.id)}`, method: "DELETE",
+    }] });
   }
 
   async function persistCustomer(customer: Customer) {
-    markLocalWrite();
-    if (!hasSupabase()) {
-      pendingWriteRef.current = false;
-      return;
-    }
-    try {
-      await upsertRows("customers", [customer]);
-      setSyncStatus("Customer saved to Supabase");
-    } catch (error) {
-      setSyncStatus(error instanceof Error ? `Customer saved locally: ${error.message}` : "Customer saved locally");
-    } finally {
-      pendingWriteRef.current = false;
-    }
+    return queueChanges({ productIds: [], mutations: [rowMutation("customers", [customer])] });
   }
 
   async function persistExpense(expense: Expense) {
-    markLocalWrite();
-    if (!hasSupabase()) {
-      pendingWriteRef.current = false;
-      return;
-    }
-    try {
-      await upsertRows("expenses", [expense]);
-      setSyncStatus("Expense saved to Supabase");
-    } catch (error) {
-      setSyncStatus(error instanceof Error ? `Expense saved locally: ${error.message}` : "Expense saved locally");
-    } finally {
-      pendingWriteRef.current = false;
-    }
+    return queueChanges({ productIds: [], mutations: [rowMutation("expenses", [expense])] });
   }
 
   async function persistSale(sale: Sale, productsAfterSale: Product[]) {
-    markLocalWrite();
-    if (!hasSupabase()) {
-      pendingWriteRef.current = false;
-      return;
-    }
-    try {
-      const { items, ...saleRow } = sale;
-      await upsertRows("sales", [saleRow]);
-      await upsertRows(
-        "sale_items",
-        items.map((item) => ({
-          id: `${sale.id}-${item.productId}`,
-          sale_id: sale.id,
-          ...item,
-        })),
-      );
-      await upsertRows("products", productsAfterSale.map(productToRow));
-      productsAfterSale.forEach((product) => protectedProductIdsRef.current.delete(product.id));
-      setSyncStatus("Sale saved to Supabase");
-    } catch (error) {
-      setSyncStatus(error instanceof Error ? `Sale saved locally: ${error.message}` : "Sale saved locally");
-    } finally {
-      pendingWriteRef.current = false;
-    }
+    const { items, ...saleRow } = sale;
+    const changed = productsAfterSale.filter((product) => items.some((item) => item.productId === product.id));
+    return queueChanges({ productIds: changed.map((product) => product.id), mutations: [
+      rowMutation("sales", [saleRow]),
+      rowMutation("sale_items", items.map((item) => ({ id: `${sale.id}-${item.productId}`, sale_id: sale.id, ...item }))),
+      ...changed.map((product) => stockMutation(product, product.stock + items.find((item) => item.productId === product.id)!.qty)),
+    ] });
   }
 
   async function deleteSaleFromSupabase(sale: Sale, productsAfterRefund: Product[]) {
-    markLocalWrite();
-    if (!hasSupabase()) {
-      pendingWriteRef.current = false;
-      return;
-    }
-    try {
-      await supabaseRequest(`sales?id=eq.${encodeURIComponent(sale.id)}`, {
-        method: "DELETE",
-        headers: { Prefer: "return=minimal" },
-      });
-      await upsertRows("products", productsAfterRefund.map(productToRow));
-      deletedSaleIdsRef.current.delete(sale.id);
-      productsAfterRefund.forEach((product) => protectedProductIdsRef.current.delete(product.id));
-      setSyncStatus("Sale refunded in Supabase");
-    } catch (error) {
-      setSyncStatus(error instanceof Error ? `Refund saved locally: ${error.message}` : "Refund saved locally");
-    } finally {
-      pendingWriteRef.current = false;
-    }
+    const changed = productsAfterRefund.filter((product) => sale.items.some((item) => item.productId === product.id));
+    return queueChanges({ productIds: changed.map((product) => product.id), deletedSaleIds: [sale.id], mutations: [
+      { path: `sales?id=eq.${encodeURIComponent(sale.id)}`, method: "DELETE" },
+      ...changed.map((product) => stockMutation(product, product.stock - sale.items.find((item) => item.productId === product.id)!.qty)),
+    ] });
   }
-
   const productsById = useMemo(
     () => new Map(store.products.map((product) => [product.id, product])),
     [store.products],
@@ -1353,7 +1290,7 @@ export default function Home() {
     };
     storeRef.current = nextStore;
     setStore(nextStore);
-    void persistProduct(product);
+    void persistProduct(product, currentStore.products.find((item) => item.id === product.id));
     setEditingProduct(emptyProduct());
     setIsProductFormOpen(false);
   }
@@ -1407,11 +1344,25 @@ export default function Home() {
   }
 
   function exportData() {
-    const blob = new Blob([JSON.stringify(store, null, 2)], { type: "application/json" });
+    const blob = new Blob([JSON.stringify({ ...store, pendingMutations: mutationQueueRef.current?.jobs ?? [] }, null, 2)], { type: "application/json" });
     const url = URL.createObjectURL(blob);
     const link = document.createElement("a");
     link.href = url;
     link.download = `pa-gerrys-mart-backup-${new Date().toISOString().slice(0, 10)}.json`;
+    link.click();
+    URL.revokeObjectURL(url);
+  }
+
+  function exportLegacyOfflineBackup() {
+    const saved = window.localStorage.getItem("pa-gerry-legacy-pending-backup");
+    if (!saved) {
+      window.alert("No older pending offline backup is stored on this device.");
+      return;
+    }
+    const url = URL.createObjectURL(new Blob([saved], { type: "application/json" }));
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = "pa-gerry-older-offline-changes.json";
     link.click();
     URL.revokeObjectURL(url);
   }
@@ -2014,6 +1965,7 @@ export default function Home() {
             </div>
             <div className="settings-band">
               <button className="primary-button" onClick={exportData}>Export Backup</button>
+              <button className="secondary-button" onClick={exportLegacyOfflineBackup}>Export Older Offline Changes</button>
               <label className="file-button">
                 Import Backup
                 <input type="file" accept="application/json" onChange={(event) => importData(event.target.files?.[0])} />
