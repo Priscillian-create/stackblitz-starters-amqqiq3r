@@ -5,6 +5,7 @@ import { AuthSession, createSessionRefresher, needsSessionRefresh, SessionExpire
 import { configureCustomerScreens, DisplayScreen, launchCustomerDisplay } from "./customer-screen";
 import { summarizeCategories } from "./category-summary";
 import { summarizeCategorySales } from "./category-sales";
+import { loadAllRows } from "./supabase-pagination";
 
 type Product = {
   id: string;
@@ -744,11 +745,11 @@ export default function Home() {
     if (pendingWriteRef.current || Date.now() < blockPullUntilRef.current) return;
     try {
       const [products, customers, expenses, sales, saleItems] = await Promise.all([
-        supabaseRequest<SupabaseProduct[]>("products?select=*&order=name.asc"),
-        supabaseRequest<SupabaseCustomer[]>("customers?select=*&order=name.asc"),
-        supabaseRequest<SupabaseExpense[]>("expenses?select=*&order=createdAt.desc"),
-        supabaseRequest<SupabaseSale[]>("sales?select=*&order=createdAt.desc"),
-        supabaseRequest<SupabaseSaleItem[]>("sale_items?select=*"),
+        loadAllRows<SupabaseProduct>("products?select=*&order=name.asc,id.asc", (path) => supabaseRequest<SupabaseProduct[]>(path)),
+        loadAllRows<SupabaseCustomer>("customers?select=*&order=name.asc,id.asc", (path) => supabaseRequest<SupabaseCustomer[]>(path)),
+        loadAllRows<SupabaseExpense>("expenses?select=*&order=createdAt.desc,id.asc", (path) => supabaseRequest<SupabaseExpense[]>(path)),
+        loadAllRows<SupabaseSale>("sales?select=*&order=createdAt.desc,id.asc", (path) => supabaseRequest<SupabaseSale[]>(path)),
+        loadAllRows<SupabaseSaleItem>("sale_items?select=*&order=id.asc", (path) => supabaseRequest<SupabaseSaleItem[]>(path)),
       ]);
       const itemsBySale = new Map<string, SupabaseSaleItem[]>();
       saleItems.forEach((item) => {
