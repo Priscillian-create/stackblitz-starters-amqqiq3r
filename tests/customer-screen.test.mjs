@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { launchCustomerDisplay, selectCustomerScreen } from '../app/customer-screen.ts';
+import { configureCustomerScreens, launchCustomerDisplay, selectCustomerScreen } from '../app/customer-screen.ts';
 
 const cashier = { left: 0, top: 0, isInternal: false };
 const customer = { left: -1280, top: 0, availWidth: 1280, availHeight: 720, isInternal: false };
@@ -57,4 +57,24 @@ test('blocked popups do not request screen permission', async () => {
   host.open = () => null;
   await launchCustomerDisplay(host);
   assert.match(host.notices[0], /allow pop-ups/);
+});
+
+test('configured monitor coordinates are used on the very first open, without waiting for permissions', async () => {
+  const host = mockHost(async () => assert.fail('Permission must be obtained during setup'));
+  const pending = launchCustomerDisplay(host, customer);
+  assert.match(host.calls[0][3], /left=-1280,top=0,width=1280,height=720/);
+  assert.equal(host.calls.filter((call) => call[0] === 'open').length, 1);
+  await pending;
+});
+
+test('screen setup requests permission without opening a cashier-screen popup', async () => {
+  const host = mockHost(async () => ({ screens: [{ ...cashier }, customer], currentScreen: cashier }));
+  const result = await configureCustomerScreens(host);
+  assert.equal(result.preferred, customer);
+  assert.equal(host.calls.length, 0);
+});
+
+test('setup explains single-screen and unsupported browser configurations', async () => {
+  await assert.rejects(configureCustomerScreens(mockHost()), /Chrome or Edge/);
+  await assert.rejects(configureCustomerScreens(mockHost(async () => ({ screens: [cashier], currentScreen: cashier }))), /Extend these displays/);
 });

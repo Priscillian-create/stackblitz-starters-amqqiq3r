@@ -1,4 +1,5 @@
 export type DisplayScreen = {
+  label?: string;
   availLeft?: number;
   availTop?: number;
   availWidth?: number;
@@ -28,22 +29,35 @@ export function selectCustomerScreen(screens: DisplayScreen[], current?: Display
   return otherScreens.find((screen) => screen.isInternal === false) ?? otherScreens[0];
 }
 
-type DisplayHost = {
+export type DisplayHost = {
   location: { href: string };
   open: (url: string, target: string, features: string) => Window | null;
   alert: (message: string) => void;
   getScreenDetails?: () => Promise<{ currentScreen?: DisplayScreen; screens: DisplayScreen[] }>;
 };
 
-export async function launchCustomerDisplay(host: DisplayHost) {
+export async function launchCustomerDisplay(host: DisplayHost, selectedScreen?: DisplayScreen) {
   const url = new URL(host.location.href);
   url.searchParams.set("customerDisplay", "1");
   const target = "pa-gerry-customer-display";
   // Reserve the window during the click, before the permission prompt consumes
   // user activation. Load the customer route immediately, even if permission fails.
-  const popup = host.open(url.href, target, "popup=yes,width=960,height=720");
+  const bounds = selectedScreen ? screenBounds(selectedScreen) : undefined;
+  const features = bounds
+    ? `popup=yes,left=${bounds.left},top=${bounds.top},width=${bounds.width},height=${bounds.height}`
+    : "popup=yes,width=960,height=720";
+  const popup = host.open(url.href, target, features);
   if (!popup) {
     host.alert("Please allow pop-ups, then open the customer display again.");
+    return;
+  }
+
+  if (bounds) {
+    // The screen permission was obtained during setup. No await is allowed
+    // before opening this window: it must retain the button's user activation.
+    popup.moveTo(bounds.left, bounds.top);
+    popup.resizeTo(bounds.width, bounds.height);
+    popup.focus();
     return;
   }
 
@@ -74,4 +88,26 @@ export async function launchCustomerDisplay(host: DisplayHost) {
     }
   }
   host.alert("Customer display is open. If it is on the cashier screen, move this window to the customer monitor. Enable extended displays on the POS device and allow this browser to manage windows on your screens for automatic placement.");
+}
+
+function screenBounds(screen: DisplayScreen) {
+  return {
+    left: Math.round(screen.availLeft ?? screen.left ?? 0),
+    top: Math.round(screen.availTop ?? screen.top ?? 0),
+    width: Math.round(screen.availWidth ?? screen.width ?? 960),
+    height: Math.round(screen.availHeight ?? screen.height ?? 720),
+  };
+}
+
+export async function configureCustomerScreens(host: DisplayHost) {
+  if (!host.getScreenDetails) {
+    throw new Error("Automatic screen placement is unavailable. Open this POS in Chrome or Edge over HTTPS, then try again.");
+  }
+  const details = await host.getScreenDetails();
+  if (details.screens.length < 2) {
+    throw new Error("The browser sees only one screen. In Windows Display settings, select Extend these displays, then try again.");
+  }
+  const preferred = selectCustomerScreen(details.screens, details.currentScreen);
+  if (!preferred) throw new Error("Cannot identify a separate customer monitor. Check Windows Display settings and try again.");
+  return { screens: details.screens, preferred };
 }

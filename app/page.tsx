@@ -2,7 +2,7 @@
 
 import { FormEvent, ReactNode, memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AuthSession, createSessionRefresher, needsSessionRefresh, SessionExpiredError } from "./auth-session";
-import { launchCustomerDisplay } from "./customer-screen";
+import { configureCustomerScreens, DisplayScreen, launchCustomerDisplay } from "./customer-screen";
 import { summarizeCategories } from "./category-summary";
 import { summarizeCategorySales } from "./category-sales";
 
@@ -306,6 +306,10 @@ export default function Home() {
   const [isAppInstalled, setIsAppInstalled] = useState(false);
   const [isCustomerDisplay, setIsCustomerDisplay] = useState(false);
   const [customerDisplay, setCustomerDisplay] = useState<CustomerDisplaySnapshot | null>(null);
+  const [displayScreens, setDisplayScreens] = useState<DisplayScreen[]>([]);
+  const [selectedDisplayScreen, setSelectedDisplayScreen] = useState("");
+  const [displaySetupStatus, setDisplaySetupStatus] = useState("");
+  const [displaySetupBusy, setDisplaySetupBusy] = useState(false);
   const authSessionRef = useRef<AuthSession | null>(null);
   const refreshSession = useMemo(() => createSessionRefresher(supabaseConfig), [supabaseConfig.url, supabaseConfig.anonKey]);
   const syncTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -1421,8 +1425,35 @@ export default function Home() {
     reader.readAsText(file);
   }
 
+  const displayScreenKey = (screen: DisplayScreen) => `${screen.left ?? screen.availLeft}:${screen.top ?? screen.availTop}`;
+
+  async function setupCustomerDisplay() {
+    setDisplaySetupBusy(true);
+    setDisplaySetupStatus("Allow screen access when the browser asks.");
+    try {
+      const { screens, preferred } = await configureCustomerScreens(window);
+      const saved = window.localStorage.getItem("pa-gerry-customer-screen");
+      const selected = screens.find((screen) => displayScreenKey(screen) === saved) ?? preferred;
+      setDisplayScreens(screens);
+      setSelectedDisplayScreen(displayScreenKey(selected));
+      setDisplaySetupStatus("Choose the customer monitor below, then press Customer Display. Close any old customer window first.");
+    } catch (error) {
+      setDisplayScreens([]);
+      setDisplaySetupStatus(error instanceof Error && error.name !== "NotAllowedError"
+        ? error.message
+        : "Screen access was denied. Allow window management in this site's Chrome or Edge settings, then press Set Customer Screen again.");
+    } finally {
+      setDisplaySetupBusy(false);
+    }
+  }
+
   function openCustomerDisplay() {
-    return launchCustomerDisplay(window);
+    const screen = displayScreens.find((item) => displayScreenKey(item) === selectedDisplayScreen);
+    if (!screen) return setupCustomerDisplay();
+    window.localStorage.setItem("pa-gerry-customer-screen", selectedDisplayScreen);
+    return launchCustomerDisplay(window, screen).catch(() => {
+      setDisplaySetupStatus("The browser could not place the window. Close the customer window, allow pop-ups and window management, then press Set Customer Screen again.");
+    });
   }
 
   const tabs = [
@@ -1587,10 +1618,23 @@ export default function Home() {
                   <p>{cart.length} item lines</p>
                 </div>
                 <div className="cart-heading-actions">
+                  <button className="table-action" disabled={displaySetupBusy} onClick={setupCustomerDisplay}>{displaySetupBusy ? "Detecting Screens..." : "Set Customer Screen"}</button>
                   <button className="table-action" onClick={openCustomerDisplay}>Customer Display</button>
                   <button className="icon-button" onClick={() => setCart([])} title="Clear cart">Clear</button>
                 </div>
               </div>
+
+              {displaySetupStatus && <div className="customer-screen-setup" role="status">
+                <p>{displaySetupStatus}</p>
+                {displayScreens.length > 0 && <label>
+                  Customer monitor
+                  <select className="input" value={selectedDisplayScreen} onChange={(event) => setSelectedDisplayScreen(event.target.value)}>
+                    {displayScreens.map((screen, index) => <option key={displayScreenKey(screen)} value={displayScreenKey(screen)}>
+                      {screen.label || `Monitor ${index + 1}`} — {screen.width ?? screen.availWidth} × {screen.height ?? screen.availHeight} ({screen.left ?? screen.availLeft}, {screen.top ?? screen.availTop})
+                    </option>)}
+                  </select>
+                </label>}
+              </div>}
 
               <div className="cart-lines">
                 {cart.length === 0 && <p className="empty">Add products to begin a sale.</p>}
