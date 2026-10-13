@@ -7,6 +7,7 @@ import { summarizeCategories } from "./category-summary";
 import { summarizeCategorySales } from "./category-sales";
 import { loadAllRows } from "./supabase-pagination";
 import { Mutation, SyncJob, SyncQueue, stockMutation } from "./sync-queue";
+import { readWithTimeout } from "./network-read";
 
 type Product = {
   id: string;
@@ -321,6 +322,7 @@ export default function Home() {
   const syncBusyRef = useRef(false);
   const pendingWriteRef = useRef(false);
   const localWriteVersionRef = useRef(0);
+  const inventoryReadRef = useRef<AbortController | null>(null);
   const mutationQueueRef = useRef<SyncQueue | null>(null);
   const blockPullUntilRef = useRef(0);
   const hasUnsyncedWritesRef = useRef(false);
@@ -497,6 +499,7 @@ export default function Home() {
     if (!localReady || !authSession || !hasSupabase()) return;
 
     const syncWhenOnline = (pushFirst = false) => {
+      if (document.visibilityState === "hidden") return;
       if (!navigator.onLine) {
         setSyncStatus("Offline changes saved");
         return;
@@ -506,6 +509,7 @@ export default function Home() {
         clearTimeout(syncTimer.current);
       }
       syncTimer.current = setTimeout(async () => {
+        if (document.visibilityState === "hidden" || !navigator.onLine) return;
         syncBusyRef.current = true;
         try {
           if (pushFirst || hasUnsyncedWritesRef.current) {
@@ -526,6 +530,9 @@ export default function Home() {
     const handleVisible = () => {
       if (document.visibilityState === "visible") {
         syncWhenOnline(false);
+      } else {
+        inventoryReadRef.current?.abort();
+        if (syncTimer.current) clearTimeout(syncTimer.current);
       }
     };
     window.addEventListener("online", handleOnline);
@@ -536,6 +543,7 @@ export default function Home() {
       window.removeEventListener("online", handleOnline);
       window.removeEventListener("focus", handleFocus);
       document.removeEventListener("visibilitychange", handleVisible);
+      inventoryReadRef.current?.abort();
       if (syncTimer.current) {
         clearTimeout(syncTimer.current);
       }
@@ -563,31 +571,37 @@ export default function Home() {
       throw new Error("Supabase is not configured yet.");
     }
 
-    const send = (token: string) => fetch(`${supabaseConfig.url}/rest/v1/${path}`, {
-      ...init,
-      headers: {
-        apikey: supabaseConfig.anonKey,
-        Authorization: `Bearer ${token || supabaseConfig.anonKey}`,
-        "Content-Type": "application/json",
-        ...(init.headers ?? {}),
-      },
-    });
-    let response = await send(accessToken);
-    if (response.status === 401 && accessToken !== supabaseConfig.anonKey && authSessionRef.current) {
-      const renewed = await validSession(authSessionRef.current, true);
-      response = await send(renewed.access_token);
-    }
+    const execute = async (signal?: AbortSignal): Promise<T> => {
+      const send = (token: string) => fetch(`${supabaseConfig.url}/rest/v1/${path}`, {
+        ...init,
+        signal,
+        headers: {
+          apikey: supabaseConfig.anonKey,
+          Authorization: `Bearer ${token || supabaseConfig.anonKey}`,
+          "Content-Type": "application/json",
+          ...(init.headers ?? {}),
+        },
+      });
+      let response = await send(accessToken);
+      if (response.status === 401 && accessToken !== supabaseConfig.anonKey && authSessionRef.current) {
+        const renewed = await validSession(authSessionRef.current, true);
+        response = await send(renewed.access_token);
+      }
 
-    if (!response.ok) {
-      const message = await response.text();
-      throw new Error(message || `Supabase request failed with ${response.status}`);
-    }
+      if (!response.ok) {
+        const message = await response.text();
+        throw new Error(message || `Supabase request failed with ${response.status}`);
+      }
 
-    if (response.status === 204) {
-      return undefined as T;
-    }
+      if (response.status === 204) {
+        return undefined as T;
+      }
 
-    return response.json() as Promise<T>;
+      return response.json() as Promise<T>;
+    };
+    return (init.method ?? "GET") === "GET"
+      ? readWithTimeout(execute, init.signal)
+      : execute(init.signal ?? undefined);
   }
 
   async function validSession(session: AuthSession, force = false): Promise<AuthSession> {
@@ -751,13 +765,15 @@ export default function Home() {
   async function loadFromSupabase() {
     if (pendingWriteRef.current || mutationQueueRef.current?.jobs.length || Date.now() < blockPullUntilRef.current) return;
     const readVersion = localWriteVersionRef.current;
+    const readController = new AbortController();
+    inventoryReadRef.current = readController;
     try {
       const [products, customers, expenses, sales, saleItems] = await Promise.all([
-        loadAllRows<SupabaseProduct>("products?select=*&order=name.asc,id.asc", (path) => supabaseRequest<SupabaseProduct[]>(path)),
-        loadAllRows<SupabaseCustomer>("customers?select=*&order=name.asc,id.asc", (path) => supabaseRequest<SupabaseCustomer[]>(path)),
-        loadAllRows<SupabaseExpense>("expenses?select=*&order=createdAt.desc,id.asc", (path) => supabaseRequest<SupabaseExpense[]>(path)),
-        loadAllRows<SupabaseSale>("sales?select=*&order=createdAt.desc,id.asc", (path) => supabaseRequest<SupabaseSale[]>(path)),
-        loadAllRows<SupabaseSaleItem>("sale_items?select=*&order=id.asc", (path) => supabaseRequest<SupabaseSaleItem[]>(path)),
+        loadAllRows<SupabaseProduct>("products?select=*&order=name.asc,id.asc", (path) => supabaseRequest<SupabaseProduct[]>(path, { signal: readController.signal })),
+        loadAllRows<SupabaseCustomer>("customers?select=*&order=name.asc,id.asc", (path) => supabaseRequest<SupabaseCustomer[]>(path, { signal: readController.signal })),
+        loadAllRows<SupabaseExpense>("expenses?select=*&order=createdAt.desc,id.asc", (path) => supabaseRequest<SupabaseExpense[]>(path, { signal: readController.signal })),
+        loadAllRows<SupabaseSale>("sales?select=*&order=createdAt.desc,id.asc", (path) => supabaseRequest<SupabaseSale[]>(path, { signal: readController.signal })),
+        loadAllRows<SupabaseSaleItem>("sale_items?select=*&order=id.asc", (path) => supabaseRequest<SupabaseSaleItem[]>(path, { signal: readController.signal })),
       ]);
       // A read started before a save may return after that save succeeds.
       // Discard it even when the mutation queue has already emptied.
@@ -814,7 +830,12 @@ export default function Home() {
       });
       setSyncStatus("Loaded from Supabase");
     } catch (error) {
-      setSyncStatus(error instanceof Error ? `Supabase load failed: ${error.message}` : "Supabase load failed");
+      readController.abort();
+      setSyncStatus(error instanceof TypeError || (error instanceof Error && ["AbortError", "TimeoutError"].includes(error.name))
+        ? "Download interrupted. Existing records kept; retrying when the POS is active and online."
+        : error instanceof Error ? `Supabase load failed: ${error.message}` : "Supabase load failed");
+    } finally {
+      if (inventoryReadRef.current === readController) inventoryReadRef.current = null;
     }
   }
 
