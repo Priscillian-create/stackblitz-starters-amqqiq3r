@@ -320,6 +320,7 @@ export default function Home() {
   const storeRef = useRef<StoreState>(initialState);
   const syncBusyRef = useRef(false);
   const pendingWriteRef = useRef(false);
+  const localWriteVersionRef = useRef(0);
   const mutationQueueRef = useRef<SyncQueue | null>(null);
   const blockPullUntilRef = useRef(0);
   const hasUnsyncedWritesRef = useRef(false);
@@ -546,6 +547,7 @@ export default function Home() {
   }
 
   function markLocalWrite(blockMs = 6000) {
+    localWriteVersionRef.current += 1;
     hasUnsyncedWritesRef.current = true;
     pendingWriteRef.current = true;
     blockPullUntilRef.current = Date.now() + blockMs;
@@ -747,7 +749,8 @@ export default function Home() {
   });
 
   async function loadFromSupabase() {
-    if (pendingWriteRef.current || Date.now() < blockPullUntilRef.current) return;
+    if (pendingWriteRef.current || mutationQueueRef.current?.jobs.length || Date.now() < blockPullUntilRef.current) return;
+    const readVersion = localWriteVersionRef.current;
     try {
       const [products, customers, expenses, sales, saleItems] = await Promise.all([
         loadAllRows<SupabaseProduct>("products?select=*&order=name.asc,id.asc", (path) => supabaseRequest<SupabaseProduct[]>(path)),
@@ -756,6 +759,9 @@ export default function Home() {
         loadAllRows<SupabaseSale>("sales?select=*&order=createdAt.desc,id.asc", (path) => supabaseRequest<SupabaseSale[]>(path)),
         loadAllRows<SupabaseSaleItem>("sale_items?select=*&order=id.asc", (path) => supabaseRequest<SupabaseSaleItem[]>(path)),
       ]);
+      // A read started before a save may return after that save succeeds.
+      // Discard it even when the mutation queue has already emptied.
+      if (readVersion !== localWriteVersionRef.current || pendingWriteRef.current || mutationQueueRef.current?.jobs.length) return;
       const itemsBySale = new Map<string, SupabaseSaleItem[]>();
       saleItems.forEach((item) => {
         itemsBySale.set(item.sale_id, [...(itemsBySale.get(item.sale_id) ?? []), item]);
@@ -784,6 +790,7 @@ export default function Home() {
             .map(({ sale_id: _saleId, id: _id, ...item }) => item),
         }));
       setStore((current) => {
+        if (readVersion !== localWriteVersionRef.current || pendingWriteRef.current || mutationQueueRef.current?.jobs.length) return current;
         const nextData = {
           products: mergedProducts,
           customers,
