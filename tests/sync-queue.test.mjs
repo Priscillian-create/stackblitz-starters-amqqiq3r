@@ -49,3 +49,15 @@ test('concurrent retries share one sender', async () => {
   await Promise.all([queue.flush(send), queue.flush(send)]);
   assert.equal(calls, 1);
 });
+
+test('a conflicting product does not block unrelated uploads or reorder dependent edits', async () => {
+  let saved;
+  const queue = new SyncQueue(null, json => { saved = json; });
+  queue.enqueue(job());
+  queue.enqueue({ id: 'dependent', productIds: ['sold'], mutations: [stockMutation({ id: 'sold', stock: 3 }, 4)] });
+  queue.enqueue({ id: 'other', productIds: ['new'], mutations: [{ path: 'products', method: 'POST', body: [{ id: 'new' }] }] });
+  const sent = [];
+  await assert.rejects(queue.flush(async mutation => { sent.push(mutation); return mutation.requireMatch ? [] : [{ id: 'new' }]; }), /Inventory changed/);
+  assert.equal(sent.length, 2);
+  assert.deepEqual(JSON.parse(saved).map(item => item.id), ['sale', 'dependent']);
+});

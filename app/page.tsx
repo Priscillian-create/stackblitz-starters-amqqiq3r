@@ -9,6 +9,8 @@ import { loadAllRows } from "./supabase-pagination";
 import { Mutation, SyncJob, SyncQueue, stockMutation } from "./sync-queue";
 import { readWithTimeout } from "./network-read";
 
+import { BarcodeLabels } from "./barcode-labels";
+
 type Product = {
   id: string;
   name: string;
@@ -297,6 +299,7 @@ export default function Home() {
   const [selectedCustomer, setSelectedCustomer] = useState("Walk-in Customer");
   const [paymentMethod, setPaymentMethod] = useState("Cash");
   const [saleDiscount, setSaleDiscount] = useState(0);
+  const [labelProduct, setLabelProduct] = useState<Product | null>(null);
   const [editingProduct, setEditingProduct] = useState<Product>(emptyProduct());
   const [isProductFormOpen, setIsProductFormOpen] = useState(false);
   const [expenseDraft, setExpenseDraft] = useState({ title: "", category: "Operations", amount: 0 });
@@ -315,9 +318,8 @@ export default function Home() {
   const [displaySetupStatus, setDisplaySetupStatus] = useState("");
   const [displaySetupBusy, setDisplaySetupBusy] = useState(false);
   const authSessionRef = useRef<AuthSession | null>(null);
-  const refreshSession = useMemo(() => createSessionRefresher(supabaseConfig), [supabaseConfig.url, supabaseConfig.anonKey]);
+  const refreshSession = useMemo(() => createSessionRefresher(supabaseConfig), [supabaseConfig]);
   const syncTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const storageTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const storeRef = useRef<StoreState>(initialState);
   const syncBusyRef = useRef(false);
   const pendingWriteRef = useRef(false);
@@ -331,7 +333,7 @@ export default function Home() {
   const deletedSaleIdsRef = useRef(new Set<string>());
 
   useEffect(() => {
-    setIsCustomerDisplay(isCustomerDisplayUrl());
+    queueMicrotask(() => setIsCustomerDisplay(isCustomerDisplayUrl()));
   }, []);
 
   useEffect(() => {
@@ -362,6 +364,7 @@ export default function Home() {
   }, [isCustomerDisplay]);
 
   useEffect(() => {
+    queueMicrotask(() => {
     const savedAuth = window.localStorage.getItem(authStorageKey);
     try {
       if (savedAuth) {
@@ -373,15 +376,28 @@ export default function Home() {
     } catch {
       window.localStorage.removeItem(authStorageKey);
     }
-    const saved = window.localStorage.getItem(storageKey);
+    const primary = window.localStorage.getItem(storageKey);
+    const saved = primary || window.localStorage.getItem(storageKey + "-recovery");
+    if (saved && !window.localStorage.getItem(storageKey + "-before-repairs")) {
+      try { window.localStorage.setItem(storageKey + "-before-repairs", saved); } catch { /* Primary data stays intact if backup storage is full. */ }
+    }
     try {
       if (saved) {
         setStore(normalizeStore(JSON.parse(saved)));
       }
     } catch {
-      window.localStorage.removeItem(storageKey);
+      try {
+        const recovery = window.localStorage.getItem(storageKey + "-recovery");
+        if (recovery) setStore(normalizeStore(JSON.parse(recovery)));
+        else { setSyncStatus("Saved data needs recovery. Export your backup before making changes."); return; }
+      } catch { setSyncStatus("Saved data needs recovery. Do not clear browser storage."); return; }
     }
-    mutationQueueRef.current = new SyncQueue(window.localStorage.getItem(mutationQueueStorageKey), (json) => window.localStorage.setItem(mutationQueueStorageKey, json));
+    try {
+      mutationQueueRef.current = new SyncQueue(window.localStorage.getItem(mutationQueueStorageKey), (json) => window.localStorage.setItem(mutationQueueStorageKey, json));
+    } catch {
+      setSyncStatus("Pending edits need recovery. Download a backup; do not clear browser storage.");
+      return;
+    }
     if (hasPendingSync() && !mutationQueueRef.current.jobs.length) {
       // Preserve legacy offline work for review, but never upload its full inventory.
       if (saved) window.localStorage.setItem("pa-gerry-legacy-pending-backup", saved);
@@ -394,6 +410,7 @@ export default function Home() {
       job.deletedSaleIds?.forEach((id) => deletedSaleIdsRef.current.add(id));
     });
     setLocalReady(true);
+    });
   }, []);
 
   useEffect(() => {
@@ -419,13 +436,23 @@ export default function Home() {
     };
 
     fetch("/api/supabase-config")
-      .then((response) => response.json())
+      .then((response) => response.json() as Promise<SupabaseConfig>)
       .then(applySupabaseConfig)
       .catch(() => applySupabaseConfig(fallbackSupabaseConfig));
   }, []);
 
   useEffect(() => {
-    if ("serviceWorker" in navigator) {
+    if ("serviceWorker" in navigator && process.env.NODE_ENV !== "production") {
+      // Retire only this app's offline worker during local development.
+      // Browser product storage is independent and is kept intact.
+      void navigator.serviceWorker.getRegistrations().then(async (registrations) => {
+        await Promise.all(registrations.filter((registration) => {
+          const worker = registration.active || registration.waiting || registration.installing;
+          return worker && new URL(worker.scriptURL).pathname === "/sw.js";
+        }).map((registration) => registration.unregister()));
+      }).catch(() => undefined);
+    }
+    if ("serviceWorker" in navigator && process.env.NODE_ENV === "production") {
       navigator.serviceWorker.register("/sw.js").then((registration) => {
         void registration.update().catch(() => undefined);
       }).catch(() => undefined);
@@ -439,7 +466,7 @@ export default function Home() {
     }
 
     const standalone = window.matchMedia("(display-mode: standalone)").matches;
-    setIsAppInstalled(standalone || Boolean((navigator as Navigator & { standalone?: boolean }).standalone));
+    queueMicrotask(() => setIsAppInstalled(standalone || Boolean((navigator as Navigator & { standalone?: boolean }).standalone)));
 
     const handleInstallPrompt = (event: Event) => {
       event.preventDefault();
@@ -461,18 +488,13 @@ export default function Home() {
   useEffect(() => {
     if (!localReady) return;
     storeRef.current = store;
-    if (storageTimer.current) {
-      clearTimeout(storageTimer.current);
+    try {
+      const json = JSON.stringify(store);
+      window.localStorage.setItem(storageKey, json);
+      try { window.localStorage.setItem(storageKey + "-recovery", json); } catch { /* Keep the successful primary save. */ }
+    } catch {
+      queueMicrotask(() => setSyncStatus("Local saving failed. Export a backup before refreshing this page."));
     }
-    storageTimer.current = setTimeout(() => {
-      window.localStorage.setItem(storageKey, JSON.stringify(storeRef.current));
-    }, 350);
-
-    return () => {
-      if (storageTimer.current) {
-        clearTimeout(storageTimer.current);
-      }
-    };
   }, [localReady, store]);
 
   useEffect(() => {
@@ -493,13 +515,14 @@ export default function Home() {
       window.removeEventListener("online", renew);
       window.removeEventListener("focus", renew);
     };
+  // Helpers read current refs; only session/config changes should renew this subscription.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [authSession, supabaseConfig.url, supabaseConfig.anonKey]);
 
   useEffect(() => {
     if (!localReady || !authSession || !hasSupabase()) return;
 
     const syncWhenOnline = (pushFirst = false) => {
-      if (document.visibilityState === "hidden") return;
       if (!navigator.onLine) {
         setSyncStatus("Offline changes saved");
         return;
@@ -509,37 +532,33 @@ export default function Home() {
         clearTimeout(syncTimer.current);
       }
       syncTimer.current = setTimeout(async () => {
-        if (document.visibilityState === "hidden" || !navigator.onLine) return;
+        if (!navigator.onLine) return;
         syncBusyRef.current = true;
         try {
-          if (pushFirst || hasUnsyncedWritesRef.current) {
-            const pushed = await pushLocalToSupabase();
-            if (!pushed) return;
-          }
+          if (pushFirst || hasUnsyncedWritesRef.current) await pushLocalToSupabase();
           await loadFromSupabase();
         } finally {
           syncBusyRef.current = false;
         }
-      }, 900);
+      }, 200);
     };
 
     syncWhenOnline(false);
-    const interval = window.setInterval(() => syncWhenOnline(false), 10000);
+    const interval = window.setInterval(() => syncWhenOnline(false), 5000);
     const handleOnline = () => syncWhenOnline(true);
     const handleFocus = () => syncWhenOnline(false);
     const handleVisible = () => {
       if (document.visibilityState === "visible") {
         syncWhenOnline(false);
-      } else {
-        inventoryReadRef.current?.abort();
-        if (syncTimer.current) clearTimeout(syncTimer.current);
       }
     };
+    window.addEventListener("pos-data-changed", handleOnline);
     window.addEventListener("online", handleOnline);
     window.addEventListener("focus", handleFocus);
     document.addEventListener("visibilitychange", handleVisible);
     return () => {
       window.clearInterval(interval);
+      window.removeEventListener("pos-data-changed", handleOnline);
       window.removeEventListener("online", handleOnline);
       window.removeEventListener("focus", handleFocus);
       document.removeEventListener("visibilitychange", handleVisible);
@@ -548,7 +567,14 @@ export default function Home() {
         clearTimeout(syncTimer.current);
       }
     };
+  // Helpers read current refs; re-creating this timer on inventory renders interrupts syncing.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [authSession, localReady, supabaseConfig.url, supabaseConfig.anonKey]);
+
+  useEffect(() => {
+    if (process.env.NODE_ENV === "production") return;
+    void fetch("/api/sync-diagnostics", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ status: syncStatus, products: store.products.length, signedIn: Boolean(authSession), pending: mutationQueueRef.current?.jobs.length ?? 0, ready: localReady, visibility: document.visibilityState, busy: syncBusyRef.current }) }).catch(() => undefined);
+  }, [syncStatus, store.products.length, authSession, localReady]);
 
   function hasSupabase() {
     return Boolean(supabaseConfig.url && supabaseConfig.anonKey);
@@ -566,7 +592,7 @@ export default function Home() {
     productIds.forEach((id) => protectedProductIdsRef.current.add(id));
   }
 
-  async function supabaseRequest<T>(path: string, init: RequestInit = {}, accessToken = supabaseConfig.anonKey): Promise<T> {
+  async function supabaseRequest<T>(path: string, init: RequestInit = {}, accessToken?: string): Promise<T> {
     if (!hasSupabase()) {
       throw new Error("Supabase is not configured yet.");
     }
@@ -582,8 +608,9 @@ export default function Home() {
           ...(init.headers ?? {}),
         },
       });
-      let response = await send(accessToken);
-      if (response.status === 401 && accessToken !== supabaseConfig.anonKey && authSessionRef.current) {
+      const token = accessToken ?? supabaseConfig.anonKey;
+      let response = await send(token);
+      if (response.status === 401 && token !== supabaseConfig.anonKey && authSessionRef.current) {
         const renewed = await validSession(authSessionRef.current, true);
         response = await send(renewed.access_token);
       }
@@ -763,7 +790,6 @@ export default function Home() {
   });
 
   async function loadFromSupabase() {
-    if (pendingWriteRef.current || mutationQueueRef.current?.jobs.length || Date.now() < blockPullUntilRef.current) return;
     const readVersion = localWriteVersionRef.current;
     const readController = new AbortController();
     inventoryReadRef.current = readController;
@@ -777,7 +803,7 @@ export default function Home() {
       ]);
       // A read started before a save may return after that save succeeds.
       // Discard it even when the mutation queue has already emptied.
-      if (readVersion !== localWriteVersionRef.current || pendingWriteRef.current || mutationQueueRef.current?.jobs.length) return;
+      if (readVersion !== localWriteVersionRef.current) return;
       const itemsBySale = new Map<string, SupabaseSaleItem[]>();
       saleItems.forEach((item) => {
         itemsBySale.set(item.sale_id, [...(itemsBySale.get(item.sale_id) ?? []), item]);
@@ -806,12 +832,32 @@ export default function Home() {
             .map(({ sale_id: _saleId, id: _id, ...item }) => item),
         }));
       setStore((current) => {
-        if (readVersion !== localWriteVersionRef.current || pendingWriteRef.current || mutationQueueRef.current?.jobs.length) return current;
+        if (readVersion !== localWriteVersionRef.current) return current;
+        function preservePending<T extends { id: string }>(table: string, remote: T[], local: T[]) {
+          const pending = new Set<string>();
+          for (const job of mutationQueueRef.current?.jobs ?? []) {
+            for (const mutation of job.mutations) {
+              if (!mutation.path.startsWith(table + "?")) continue;
+              const body = Array.isArray(mutation.body) ? mutation.body : [mutation.body];
+              for (const row of body) if (row && typeof row === "object" && "id" in row) pending.add(String(row.id));
+            }
+            if (table === "sales") {
+              for (const id of job.saleIds ?? []) pending.add(id);
+              // Partial sale uploads may have already removed their sales-row mutation.
+              for (const mutation of job.mutations) if (mutation.path.startsWith("sale_items?")) {
+                for (const row of Array.isArray(mutation.body) ? mutation.body : []) if (row.sale_id) pending.add(row.sale_id);
+              }
+            }
+          }
+          const rows = new Map(remote.map((row) => [row.id, row]));
+          for (const row of local) if (pending.has(row.id)) rows.set(row.id, row);
+          return [...rows.values()];
+        }
         const nextData = {
           products: mergedProducts,
-          customers,
-          expenses,
-          sales: mergedSales,
+          customers: preservePending("customers", customers, current.customers),
+          expenses: preservePending("expenses", expenses, current.expenses),
+          sales: preservePending("sales", mergedSales, current.sales).filter((sale) => !deletedSaleIdsRef.current.has(sale.id)),
         };
 
         if (
@@ -828,7 +874,7 @@ export default function Home() {
           ...nextData,
         };
       });
-      setSyncStatus("Loaded from Supabase");
+      setSyncStatus(mutationQueueRef.current?.jobs.length ? "Shared updates received; " + mutationQueueRef.current.jobs.length + " local changes pending review" : "Synced with shared database");
     } catch (error) {
       readController.abort();
       setSyncStatus(error instanceof TypeError || (error instanceof Error && ["AbortError", "TimeoutError"].includes(error.name))
@@ -843,6 +889,7 @@ export default function Home() {
     if (!mutationQueueRef.current) throw new Error("Local storage is not ready.");
     mutationQueueRef.current.enqueue({ ...job, id: crypto.randomUUID() });
     markLocalWrite();
+    window.dispatchEvent(new Event("pos-data-changed"));
     return pushLocalToSupabase();
   }
 
@@ -865,11 +912,22 @@ export default function Home() {
     }
     try {
       setSyncStatus("Syncing changed records...");
-      await queue.flush((mutation) => supabaseRequest(mutation.path, {
+      await queue.flush((mutation) => {
+        // Only compare fields this edit actually changes. Sales stock checks remain intact.
+        let path = mutation.path;
+        if (mutation.method === "PATCH" && path.startsWith("products?") && mutation.body && typeof mutation.body === "object") {
+          const fields = mutation.body as Record<string, unknown>;
+          path = path.split("&").filter((part) => {
+            const key = part.split("=")[0];
+            return !["stock", "price", "cost"].includes(key) || Object.prototype.hasOwnProperty.call(fields, key);
+          }).join("&");
+        }
+        return supabaseRequest(path, {
         method: mutation.method,
         headers: { Prefer: mutation.method === "POST" ? "resolution=merge-duplicates,return=representation" : "return=representation" },
         ...(mutation.body === undefined ? {} : { body: JSON.stringify(mutation.body) }),
-      }));
+      });
+      });
       hasUnsyncedWritesRef.current = queue.jobs.length > 0;
       pendingWriteRef.current = false;
       if (!queue.jobs.length) {
@@ -885,6 +943,12 @@ export default function Home() {
       pendingWriteRef.current = false;
       setSyncStatus(error instanceof Error ? `Sync needs attention: ${error.message}` : "Pending changes kept locally");
       return false;
+    } finally {
+      // A conflict on one item must not freeze updates to already-synced products.
+      protectedProductIdsRef.current = new Set(queue.jobs.flatMap((job) => job.productIds));
+      deletedProductIdsRef.current = new Set(queue.jobs.flatMap((job) => job.deletedProductIds ?? []));
+      deletedSaleIdsRef.current = new Set(queue.jobs.flatMap((job) => job.deletedSaleIds ?? []));
+      hasUnsyncedWritesRef.current = queue.jobs.length > 0;
     }
   }
 
@@ -917,7 +981,7 @@ export default function Home() {
   async function persistSale(sale: Sale, productsAfterSale: Product[]) {
     const { items, ...saleRow } = sale;
     const changed = productsAfterSale.filter((product) => items.some((item) => item.productId === product.id));
-    return queueChanges({ productIds: changed.map((product) => product.id), mutations: [
+    return queueChanges({ productIds: changed.map((product) => product.id), saleIds: [sale.id], mutations: [
       rowMutation("sales", [saleRow]),
       rowMutation("sale_items", items.map((item) => ({ id: `${sale.id}-${item.productId}`, sale_id: sale.id, ...item }))),
       ...changed.map((product) => stockMutation(product, product.stock + items.find((item) => item.productId === product.id)!.qty)),
@@ -1296,6 +1360,7 @@ export default function Home() {
 
   function saveProduct(event: FormEvent) {
     event.preventDefault();
+    if (!localReady) { setSyncStatus("Local storage is not ready. Download a backup before adding products."); return; }
     const otherProducts = store.products.filter((item) => item.id !== editingProduct.id);
     const product = {
       ...editingProduct,
@@ -1316,6 +1381,15 @@ export default function Home() {
         ? currentStore.products.map((item) => (item.id === product.id ? product : item))
         : [product, ...currentStore.products],
     };
+    // Commit before closing the form, so an immediate refresh retains the item.
+    try {
+      const json = JSON.stringify(nextStore);
+      window.localStorage.setItem(storageKey, json);
+      try { window.localStorage.setItem(storageKey + "-recovery", json); } catch { /* Keep the successful primary save. */ }
+    } catch {
+      setSyncStatus("Product could not be saved on this laptop. Free browser storage and try again.");
+      return;
+    }
     storeRef.current = nextStore;
     setStore(nextStore);
     void persistProduct(product, currentStore.products.find((item) => item.id === product.id));
@@ -1371,6 +1445,37 @@ export default function Home() {
     setCustomerDraft({ name: "", phone: "" });
   }
 
+  async function reviewPendingChanges() {
+    const queue = mutationQueueRef.current;
+    if (!queue?.jobs.length) { setSyncStatus("No pending changes"); return; }
+    if (syncBusyRef.current) return;
+    syncBusyRef.current = true;
+    try {
+      for (const job of queue.jobs) {
+        const mutation = job.mutations[0];
+        if (!mutation?.requireMatch || mutation.method !== "PATCH" || !mutation.path.startsWith("products?")) continue;
+        const query = new URLSearchParams(mutation.path.split("?")[1]);
+        const id = query.get("id");
+        if (!id) continue;
+        const rows = await supabaseRequest<SupabaseProduct[]>("products?select=*&id=" + encodeURIComponent(id));
+        const remote = rows[0];
+        if (!remote) { setSyncStatus("A pending product was deleted on another device. Local copy kept; download a backup for review."); continue; }
+        const fields = mutation.body as Record<string, unknown>;
+        const details = Object.entries(fields).map(([key, value]) => key + ": shared " + JSON.stringify(remote[key as keyof SupabaseProduct]) + " → your edit " + JSON.stringify(value)).join("\n");
+        if (!window.confirm("Review " + remote.name + "\n\n" + details + "\n\nApply your edited values to the shared product? Cancel keeps this pending edit saved locally.")) continue;
+        const guard = new URLSearchParams();
+        guard.set("id", id);
+        for (const key of ["stock", "price", "cost"] as const) {
+          if (Object.prototype.hasOwnProperty.call(fields, key)) guard.set(key, "eq." + remote[key]);
+        }
+        mutation.path = "products?" + guard.toString();
+        window.localStorage.setItem(mutationQueueStorageKey, JSON.stringify(queue.jobs));
+      }
+      if (await pushLocalToSupabase()) await loadFromSupabase();
+    } catch (error) { setSyncStatus(error instanceof Error ? error.message : "Review failed; pending edits kept locally"); }
+    finally { syncBusyRef.current = false; }
+  }
+
   function exportData() {
     const blob = new Blob([JSON.stringify({ ...store, pendingMutations: mutationQueueRef.current?.jobs ?? [] }, null, 2)], { type: "application/json" });
     const url = URL.createObjectURL(blob);
@@ -1399,8 +1504,26 @@ export default function Home() {
     if (!file) return;
     const reader = new FileReader();
     reader.onload = () => {
-      const parsed = JSON.parse(String(reader.result)) as StoreState;
-      setStore(parsed);
+      try {
+        const raw = JSON.parse(String(reader.result));
+        if (!Array.isArray(raw.products) || !Array.isArray(raw.sales) || !Array.isArray(raw.customers) || !Array.isArray(raw.expenses) || !raw.settings) throw new Error("This is not a complete POS backup.");
+        const imported = normalizeStore(raw as StoreState);
+        const current = storeRef.current;
+        const merge = <T extends { id: string },>(existing: T[], restored: T[]) => {
+          const rows = new Map(restored.map((row) => [row.id, row]));
+          existing.forEach((row) => rows.set(row.id, row));
+          return [...rows.values()];
+        };
+        const restored = { ...current, products: merge(current.products, imported.products), sales: merge(current.sales, imported.sales), customers: merge(current.customers, imported.customers), expenses: merge(current.expenses, imported.expenses) };
+        // Retain current records when importing an older backup.
+        window.localStorage.setItem(storageKey + "-before-import", JSON.stringify(current));
+        window.localStorage.setItem(storageKey, JSON.stringify(restored));
+        storeRef.current = restored;
+        setStore(restored);
+        setSyncStatus("Backup merged locally; newer existing records preserved.");
+      } catch (error) {
+        setSyncStatus(error instanceof Error ? "Backup import failed: " + error.message : "Backup import failed; existing data kept.");
+      }
     };
     reader.readAsText(file);
   }
@@ -1524,7 +1647,7 @@ export default function Home() {
             <div className="user-info">
               <div className={`connection-status ${hasSupabase() ? "online" : "offline"}`}>
                 <span className="status-dot" />
-                <span>{hasSupabase() ? "Online" : "Local"}</span>
+                <span role="status" title={syncStatus}>{syncStatus}</span>
               </div>
               <div className="user-icon">PG</div>
               <span>{store.settings.cashier}</span>
@@ -1532,6 +1655,18 @@ export default function Home() {
               <button className="install-button" onClick={installApp}>
                 {isAppInstalled ? "Installed" : "Install App"}
               </button>
+              <button className="table-action" onClick={async () => {
+                if (syncBusyRef.current) return;
+                syncBusyRef.current = true;
+                try {
+                  await pushLocalToSupabase();
+                  await loadFromSupabase();
+                } finally {
+                  syncBusyRef.current = false;
+                }
+              }}>Sync now</button>
+              <button className="table-action" onClick={reviewPendingChanges}>Review pending edits</button>
+              <button className="table-action" onClick={exportData}>Download backup</button>
               <button className="table-action" onClick={signOut}>Sign Out</button>
             </div>
           </header>
@@ -1767,6 +1902,7 @@ export default function Home() {
                             setEditingProduct(product);
                             setIsProductFormOpen(true);
                           }}>Edit</button>
+                          <button className="table-action" onClick={() => setLabelProduct(product)}>Print labels</button>
                           <button className="table-action danger" onClick={() => deleteProduct(product)}>Delete</button>
                         </div>
                       )}
@@ -1775,6 +1911,7 @@ export default function Home() {
                 }}
               </ProductResults>
             </div>
+            {labelProduct && <BarcodeLabels product={labelProduct} price={money(labelProduct.price, store.settings.currency)} onClose={() => setLabelProduct(null)} />}
             {isAdmin && isProductFormOpen && (
               <div className="product-modal" role="dialog" aria-modal="true" aria-labelledby="product-form-title">
                 <form className="form-panel product-dashboard" onSubmit={saveProduct}>
@@ -2352,7 +2489,7 @@ function DataTable({
 }: {
   title: string;
   headers: string[];
-  rows: Array<Array<string | number | JSX.Element>>;
+  rows: Array<Array<string | number | ReactNode>>;
 }) {
   return (
     <div className="table-wrap">
@@ -2383,7 +2520,7 @@ function DataTable({
   );
 }
 
-const supabaseSchema = `create table if not exists products (
+const _supabaseSchema = `create table if not exists products (
   id text primary key,
   name text not null,
   sku text,

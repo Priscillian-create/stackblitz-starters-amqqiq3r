@@ -9,6 +9,7 @@ export type SyncJob = {
   productIds: string[];
   deletedProductIds?: string[];
   deletedSaleIds?: string[];
+  saleIds?: string[];
   mutations: Mutation[];
 };
 
@@ -29,20 +30,27 @@ export class SyncQueue {
   flush(send: (mutation: Mutation) => Promise<unknown>) {
     if (this.running) return this.running;
     this.running = (async () => {
-      while (this.jobs.length) {
-        const job = this.jobs[0];
+      let conflict: Error | null = null;
+      const blocked = new Set<string>();
+      for (const job of [...this.jobs]) {
+        const keys = [...job.productIds, ...(job.deletedProductIds ?? [])];
+        if (keys.some((id) => blocked.has(id))) continue;
         while (job.mutations.length) {
           const mutation = job.mutations[0];
           const result = await send(mutation);
           if (mutation.requireMatch && (!Array.isArray(result) || result.length !== 1)) {
-            throw new Error("Inventory changed on another device or this product was deleted. Pending changes kept; export a backup and reconcile before retrying.");
+            conflict = new Error("Inventory changed on another device or this product was deleted. Conflicting changes kept locally; unrelated uploads have continued.");
+            keys.forEach((id) => blocked.add(id));
+            break;
           }
           job.mutations.shift();
           this.save(JSON.stringify(this.jobs));
         }
-        this.jobs.shift();
+        if (job.mutations.length) continue;
+        this.jobs.splice(this.jobs.indexOf(job), 1);
         this.save(JSON.stringify(this.jobs));
       }
+      if (conflict) throw conflict;
     })().finally(() => { this.running = null; });
     return this.running;
   }

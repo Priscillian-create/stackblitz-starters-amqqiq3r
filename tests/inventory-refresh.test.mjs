@@ -59,3 +59,38 @@ test('a deferred React updater also rejects a snapshot when a write happens befo
   h.context.localWriteVersionRef.current++;
   assert.equal(h.updates[0](h.current), h.current);
 });
+
+test('pending local changes do not block shared customer and expense updates', async () => {
+  const h = await harness();
+  h.context.mutationQueueRef.current.jobs = [{ productIds: [], mutations: [{ path: 'customers?on_conflict=id', method: 'POST', body: [{ id: 'local-customer' }] }] }];
+  h.current.customers = [{ id: 'local-customer', name: 'Unsynced edit' }];
+  h.context.loadAllRows = async path => path.startsWith('customers?') ? [{ id: 'remote-customer', name: 'Another device' }] : path.startsWith('expenses?') ? [{ id: 'remote-expense' }] : [];
+  await h.download();
+  const next = h.updates[0](h.current);
+  assert.equal(next.customers.length, 2);
+  assert.equal(next.customers.find(row => row.id === 'local-customer').name, 'Unsynced edit');
+  assert.equal(next.expenses[0].id, 'remote-expense');
+});
+
+test('partially uploaded sales keep local line items while other device sales arrive', async () => {
+  const h = await harness();
+  h.context.mutationQueueRef.current.jobs = [{ productIds: ['product'], saleIds: ['local-sale'], mutations: [] }];
+  h.current.sales = [{ id: 'local-sale', items: [{ productId: 'product', qty: 2 }] }];
+  h.context.loadAllRows = async path => path.startsWith('sales?') ? [{ id: 'local-sale' }, { id: 'remote-sale' }] : [];
+  await h.download();
+  const next = h.updates[0](h.current);
+  assert.equal(next.sales.length, 2);
+  assert.equal(next.sales.find(row => row.id === 'local-sale').items[0].qty, 2);
+});
+
+test('shared downloads retain a newly added local product while receiving other device products', async () => {
+  const h = await harness();
+  h.context.protectedProductIdsRef.current.add('new');
+  h.context.mutationQueueRef.current.jobs = [{ productIds: ['new'], mutations: [{ path: 'products?on_conflict=id', method: 'POST', body: [{ id: 'new' }] }] }];
+  h.context.loadAllRows = async path => path.startsWith('products?') ? [{ id: 'other-device', name: 'Remote product' }] : [];
+  await h.download();
+  const next = h.updates[0](h.current);
+  assert.equal(next.products.length, 2);
+  assert.equal(next.products.find(row => row.id === 'new').name, 'GALVUS MET');
+  assert.equal(next.products.find(row => row.id === 'other-device').name, 'Remote product');
+});
