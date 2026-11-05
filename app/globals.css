@@ -1953,3 +1953,9 @@ th {
     box-shadow: none;
   }
 }
+
+.sync-menu { position: relative; font-size: 13px; }
+.sync-menu summary { cursor: pointer; font-weight: 600; padding: 8px 10px; }
+.sync-menu-panel { position: absolute; right: 0; top: 100%; z-index: 40; width: min(300px, 85vw); padding: 14px; background: #fff; color: #17202a; border: 1px solid #e2e8f0; border-radius: 10px; box-shadow: 0 8px 24px #0002; display: grid; gap: 8px; }
+.sync-menu-panel p { margin: 0 0 6px; font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; }
+.sync-menu-panel .table-action { text-align: left; padding: 8px; }

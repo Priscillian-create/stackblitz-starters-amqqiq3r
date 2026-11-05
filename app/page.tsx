@@ -1572,6 +1572,7 @@ export default function Home() {
   ];
   const activeTabMeta = tabs.find((tab) => tab.key === activeTab) ?? tabs[0];
   const isAdmin = store.settings.userRole === "Admin";
+  const syncNeedsAttention = /failed|conflict|attention|pending review|recovery|could not|not ready/i.test(syncStatus);
 
   if (isCustomerDisplay) {
     return <CustomerDisplay snapshot={customerDisplay} />;
@@ -1647,7 +1648,7 @@ export default function Home() {
             <div className="user-info">
               <div className={`connection-status ${hasSupabase() ? "online" : "offline"}`}>
                 <span className="status-dot" />
-                <span role="status" title={syncStatus}>{syncStatus}</span>
+                <span role="status">{syncNeedsAttention ? "Needs attention" : hasSupabase() ? "Connected" : "Offline"}</span>
               </div>
               <div className="user-icon">PG</div>
               <span>{store.settings.cashier}</span>
@@ -1655,18 +1656,20 @@ export default function Home() {
               <button className="install-button" onClick={installApp}>
                 {isAppInstalled ? "Installed" : "Install App"}
               </button>
-              <button className="table-action" onClick={async () => {
-                if (syncBusyRef.current) return;
-                syncBusyRef.current = true;
-                try {
-                  await pushLocalToSupabase();
-                  await loadFromSupabase();
-                } finally {
-                  syncBusyRef.current = false;
-                }
-              }}>Sync now</button>
-              <button className="table-action" onClick={reviewPendingChanges}>Review pending edits</button>
-              <button className="table-action" onClick={exportData}>Download backup</button>
+              <details className="sync-menu">
+                <summary>Sync &amp; backup</summary>
+                <div className="sync-menu-panel">
+                  <p>{syncStatus}</p>
+                  <button className="table-action" onClick={async () => {
+                    if (syncBusyRef.current) return;
+                    syncBusyRef.current = true;
+                    try { await pushLocalToSupabase(); await loadFromSupabase(); }
+                    finally { syncBusyRef.current = false; }
+                  }}>Sync now</button>
+                  <button className="table-action" onClick={reviewPendingChanges}>Review pending edits</button>
+                  <button className="table-action" onClick={exportData}>Download backup</button>
+                </div>
+              </details>
               <button className="table-action" onClick={signOut}>Sign Out</button>
             </div>
           </header>
