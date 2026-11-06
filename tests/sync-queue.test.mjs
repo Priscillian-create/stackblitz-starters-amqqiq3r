@@ -79,3 +79,21 @@ test('edits added while an upload is in flight drain automatically in the same f
   assert.equal(paths.length, 2);
   assert.equal(queue.jobs.length, 0);
 });
+
+test('conflict error identifies every blocked product while a new product still uploads', async () => {
+  const queue = new SyncQueue(null, () => {});
+  queue.enqueue(job());
+  queue.enqueue({ id: 'another-conflict', productIds: ['other'], mutations: [stockMutation({ id: 'other', stock: 8 }, 9)] });
+  queue.enqueue({ id: 'new-product', productIds: ['new'], mutations: [{ path: 'products?on_conflict=id', method: 'POST', body: [{ id: 'new' }] }] });
+  const uploaded = [];
+  await assert.rejects(queue.flush(async mutation => {
+    if (mutation.requireMatch) return [];
+    uploaded.push(mutation.body[0].id); return mutation.body;
+  }), error => {
+    assert.equal(error.name, 'InventoryConflictError');
+    assert.deepEqual(error.productIds, ['sold', 'other']);
+    return true;
+  });
+  assert.deepEqual(uploaded, ['new']);
+  assert.equal(queue.jobs.length, 2);
+});

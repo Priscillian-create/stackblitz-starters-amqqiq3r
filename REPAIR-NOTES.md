@@ -23,3 +23,6 @@ Saved product, stock, sale, customer, and expense changes upload immediately. Ch
 
 ## Connection recovery
 Database reads and writes now go through /api/database on the application's own host. Both the Vinext API route and the Netlify function forward the caller's bearer token to the configured Supabase project; no service-role key is used. The relay restricts requests to POS tables, disables caching, preserves database status codes, and bounds upstream requests to 15 seconds. Browser requests have a 20-second timeout. Failed or uncertain writes remain queued. Network failures share a retry cooldown of 5, 10, 20, 40, then 60 seconds; a successful sync or network reconnect resets it. No browser storage or database records are cleared.
+
+## Inventory conflict review
+Conflict messages now list affected product names. Independent new products continue uploading. Review pending edits uploads unrelated work first, then uploads each accepted decision before reading the next dependent edit. Cancelling keeps that product's later edits pending too. Review never recreates a missing product automatically and cannot distinguish deletion from rows hidden by database permissions without administrator checks.

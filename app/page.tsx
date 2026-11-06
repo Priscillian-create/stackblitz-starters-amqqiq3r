@@ -6,7 +6,7 @@ import { configureCustomerScreens, DisplayScreen, launchCustomerDisplay } from "
 import { summarizeCategories } from "./category-summary";
 import { summarizeCategorySales } from "./category-sales";
 import { loadAllRows } from "./supabase-pagination";
-import { Mutation, SyncJob, SyncQueue, stockMutation } from "./sync-queue";
+import { InventoryConflictError, Mutation, SyncJob, SyncQueue, stockMutation } from "./sync-queue";
 import { readWithTimeout } from "./network-read";
 import { createAutoSync } from "./auto-sync";
 import { DatabaseConnectionError, SyncBackoff } from "./sync-backoff";
@@ -975,7 +975,11 @@ export default function Home() {
       pendingWriteRef.current = false;
       setSyncStatus(error instanceof DatabaseConnectionError
         ? "Connection interrupted. Changes saved only on this device; automatic sync will retry in up to 60 seconds. Do not clear application data."
-        : error instanceof Error ? `Sync needs attention: ${error.message}` : "Pending changes kept locally");
+        : error instanceof InventoryConflictError
+          ? "Stock or product edit needs review: " + error.productIds.map((id) =>
+              storeRef.current.products.find((product) => product.id === id)?.name || id,
+            ).join(", ") + ". Other products continued uploading. Open Sync & backup → Review pending edits to compare and choose whether to apply your values."
+          : error instanceof Error ? `Sync needs attention: ${error.message}` : "Pending changes kept locally");
       return false;
     } finally {
       // A conflict on one item must not freeze updates to already-synced products.
@@ -1485,7 +1489,11 @@ export default function Home() {
     if (syncBusyRef.current) return;
     syncBusyRef.current = true;
     try {
-      for (const job of queue.jobs) {
+      // Upload independent work first and inspect only jobs still pending.
+      await pushLocalToSupabase();
+      const deferredProducts = new Set<string>();
+      for (const job of [...queue.jobs]) {
+        if (!queue.jobs.includes(job) || job.productIds.some((id) => deferredProducts.has(id))) continue;
         const mutation = job.mutations[0];
         if (!mutation?.requireMatch || mutation.method !== "PATCH" || !mutation.path.startsWith("products?")) continue;
         const query = new URLSearchParams(mutation.path.split("?")[1]);
@@ -1493,10 +1501,10 @@ export default function Home() {
         if (!id) continue;
         const rows = await supabaseRequest<SupabaseProduct[]>("products?select=*&id=" + encodeURIComponent(id));
         const remote = rows[0];
-        if (!remote) { setSyncStatus("A pending product was deleted on another device. Local copy kept; download a backup for review."); continue; }
+        if (!remote) { job.productIds.forEach((id) => deferredProducts.add(id)); setSyncStatus("A pending product was deleted or is hidden by database permissions. Local copy kept; download a backup for review."); continue; }
         const fields = mutation.body as Record<string, unknown>;
         const details = Object.entries(fields).map(([key, value]) => key + ": shared " + JSON.stringify(remote[key as keyof SupabaseProduct]) + " → your edit " + JSON.stringify(value)).join("\n");
-        if (!window.confirm("Review " + remote.name + "\n\n" + details + "\n\nApply your edited values to the shared product? Cancel keeps this pending edit saved locally.")) continue;
+        if (!window.confirm("Review " + remote.name + "\n\n" + details + "\n\nApply your edited values to the shared product? Cancel keeps this pending edit saved locally.")) { job.productIds.forEach((id) => deferredProducts.add(id)); continue; }
         const guard = new URLSearchParams();
         guard.set("id", id);
         for (const key of ["stock", "price", "cost"] as const) {
@@ -1504,6 +1512,9 @@ export default function Home() {
         }
         mutation.path = "products?" + guard.toString();
         window.localStorage.setItem(mutationQueueStorageKey, JSON.stringify(queue.jobs));
+        // Commit this decision before reading the next dependent edit.
+        await pushLocalToSupabase();
+        if (queue.jobs.includes(job)) job.productIds.forEach((id) => deferredProducts.add(id));
       }
       if (await pushLocalToSupabase()) await loadFromSupabase();
     } catch (error) { setSyncStatus(error instanceof Error ? error.message : "Review failed; pending edits kept locally"); }
@@ -1607,7 +1618,7 @@ export default function Home() {
   const activeTabMeta = tabs.find((tab) => tab.key === activeTab) ?? tabs[0];
   const isAdmin = store.settings.userRole === "Admin";
   const syncConnectionInterrupted = /connection interrupted|^offline/i.test(syncStatus);
-  const syncNeedsAttention = /failed|conflict|attention|pending review|recovery|could not|not ready|only on this device|only on this laptop|sign in to back up/i.test(syncStatus);
+  const syncNeedsAttention = /failed|conflict|attention|pending review|needs review|recovery|could not|not ready|only on this device|only on this laptop|sign in to back up/i.test(syncStatus);
 
   if (isCustomerDisplay) {
     return <CustomerDisplay snapshot={customerDisplay} />;

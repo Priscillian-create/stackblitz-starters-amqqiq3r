@@ -13,6 +13,15 @@ export type SyncJob = {
   mutations: Mutation[];
 };
 
+export class InventoryConflictError extends Error {
+  productIds: string[];
+  constructor(productIds: string[]) {
+    super("Inventory changed on another device or this product was deleted. Conflicting changes kept locally; unrelated uploads have continued.");
+    this.name = "InventoryConflictError";
+    this.productIds = productIds;
+  }
+}
+
 // Persist explicit mutations, never a full cached database snapshot.
 export class SyncQueue {
   jobs: SyncJob[];
@@ -30,7 +39,7 @@ export class SyncQueue {
   flush(send: (mutation: Mutation) => Promise<unknown>) {
     if (this.running) return this.running;
     this.running = (async () => {
-      let conflict: Error | null = null;
+      const conflicts = new Set<string>();
       const blocked = new Set<string>();
       // Read the live queue so edits added during an upload are sent in this pass.
       for (let index = 0; index < this.jobs.length;) {
@@ -41,7 +50,7 @@ export class SyncQueue {
           const mutation = job.mutations[0];
           const result = await send(mutation);
           if (mutation.requireMatch && (!Array.isArray(result) || result.length !== 1)) {
-            conflict = new Error("Inventory changed on another device or this product was deleted. Conflicting changes kept locally; unrelated uploads have continued.");
+            keys.forEach((id) => conflicts.add(id));
             keys.forEach((id) => blocked.add(id));
             break;
           }
@@ -52,7 +61,7 @@ export class SyncQueue {
         this.jobs.splice(this.jobs.indexOf(job), 1);
         this.save(JSON.stringify(this.jobs));
       }
-      if (conflict) throw conflict;
+      if (conflicts.size) throw new InventoryConflictError([...conflicts]);
     })().finally(() => { this.running = null; });
     return this.running;
   }
