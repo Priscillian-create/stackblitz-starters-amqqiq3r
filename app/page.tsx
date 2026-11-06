@@ -807,6 +807,16 @@ export default function Home() {
         loadAllRows<SupabaseSale>("sales?select=*&order=createdAt.desc,id.asc", (path) => supabaseRequest<SupabaseSale[]>(path, { signal: readController.signal })),
         loadAllRows<SupabaseSaleItem>("sale_items?select=*&order=id.asc", (path) => supabaseRequest<SupabaseSaleItem[]>(path, { signal: readController.signal })),
       ]);
+      // Older installations granted inventory access only to anon. An authenticated
+      // empty result can mean hidden rows, not an empty shared inventory.
+      if (!products.length) {
+        const publicRows = await supabaseRequest<{ id: string }[]>(
+          "products?select=id&limit=1", { signal: readController.signal }, supabaseConfig.anonKey,
+        );
+        if (publicRows?.length) {
+          throw new Error("Database permissions hide products from signed-in users. Apply supabase/authenticated-inventory-access.sql in Supabase SQL Editor, then Sync now. Existing local records have been kept.");
+        }
+      }
       // A read started before a save may return after that save succeeds.
       // Discard it even when the mutation queue has already emptied.
       if (readVersion !== localWriteVersionRef.current) return;
@@ -2605,9 +2615,9 @@ alter table sale_items enable row level security;
 alter table expenses enable row level security;
 alter table app_users enable row level security;
 
-create policy "public products access" on products for all to anon using (true) with check (true);
-create policy "public customers access" on customers for all to anon using (true) with check (true);
-create policy "public sales access" on sales for all to anon using (true) with check (true);
-create policy "public sale items access" on sale_items for all to anon using (true) with check (true);
-create policy "public expenses access" on expenses for all to anon using (true) with check (true);
+create policy "signed-in products access" on products for all to authenticated using (true) with check (true);
+create policy "signed-in customers access" on customers for all to authenticated using (true) with check (true);
+create policy "signed-in sales access" on sales for all to authenticated using (true) with check (true);
+create policy "signed-in sale items access" on sale_items for all to authenticated using (true) with check (true);
+create policy "signed-in expenses access" on expenses for all to authenticated using (true) with check (true);
 create policy "users can read own role" on app_users for select to authenticated using (lower(email) = lower(auth.email()));`;

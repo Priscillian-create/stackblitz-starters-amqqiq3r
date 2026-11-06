@@ -21,7 +21,8 @@ async function harness() {
     storeRef: { current }, protectedProductIdsRef: { current: new Set() },
     deletedProductIdsRef: { current: new Set() }, deletedSaleIdsRef: { current: new Set() },
     loadAllRows: async path => path.startsWith('products?') ? products : [],
-    supabaseRequest: () => {}, productFromRow: row => row,
+    supabaseConfig: { anonKey: "public" },
+    supabaseRequest: async () => [], productFromRow: row => row,
     setStore: update => updates.push(update), setSyncStatus: () => {},
     sameJson: (a, b) => JSON.stringify(a) === JSON.stringify(b),
   };
@@ -102,4 +103,16 @@ test('background downloads do not replace an upload failure with a generic statu
   h.resolveProducts([]);
   await h.download(false);
   assert.equal(statuses.length, 0);
+});
+
+test('anonymous-visible inventory cannot be mistaken for an empty authenticated database', async () => {
+  const h = await harness();
+  const statuses = [];
+  h.context.setSyncStatus = value => statuses.push(value);
+  h.context.supabaseConfig = { anonKey: 'public' };
+  h.context.supabaseRequest = async () => [{ id: 'existing-server-product' }];
+  h.resolveProducts([]);
+  await h.download();
+  assert.equal(h.updates.length, 0);
+  assert.match(statuses[0], /Database permissions hide products/);
 });
