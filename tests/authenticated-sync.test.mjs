@@ -3,6 +3,7 @@ import { readFile } from 'node:fs/promises';
 import { stripTypeScriptTypes } from 'node:module';
 import vm from 'node:vm';
 import test from 'node:test';
+import { DatabaseConnectionError, SyncBackoff } from '../app/sync-backoff.ts';
 
 async function harness(responses = [200]) {
   const source = await readFile(new URL('../app/page.tsx', import.meta.url), 'utf8');
@@ -12,10 +13,12 @@ async function harness(responses = [200]) {
   const renewals = [];
   const context = {
     hasSupabase: () => true,
+    DatabaseConnectionError,
+    syncBackoffRef: { current: new SyncBackoff() },
     supabaseConfig: { url: 'https://database.test', anonKey: 'public' },
     authSessionRef: { current: { access_token: 'signed-in' } },
     validSession: async (session, force) => { renewals.push(force); return { access_token: force ? 'renewed' : session.access_token }; },
-    fetch: async (url, init) => { calls.push(init); return new Response(JSON.stringify([]), { status: responses.shift() ?? 200 }); },
+    fetch: async (url, init) => { calls.push({ ...init, url }); return new Response(JSON.stringify([]), { status: responses.shift() ?? 200 }); },
     readWithTimeout: fn => fn(),
   };
   return { request: vm.runInNewContext(`(${stripTypeScriptTypes(source.slice(start, end))})`, context), calls, renewals, context };
@@ -41,4 +44,13 @@ test('database downloads after browser data is cleared use the new signed-in ses
   h.context.authSessionRef.current = { access_token: 'fresh-login' };
   await h.request('products?select=*');
   assert.equal(h.calls[0].headers.Authorization, 'Bearer fresh-login');
+});
+
+test('browser uploads use the same-origin relay and a connection failure activates cooldown', async () => {
+  const h = await harness([503]);
+  await assert.rejects(h.request('products?on_conflict=id', { method: 'POST', body: '[]' }), DatabaseConnectionError);
+  assert.equal(h.calls[0].url, '/api/database?table=products&on_conflict=id');
+  assert.ok(h.context.syncBackoffRef.current.remaining() > 0);
+  await assert.rejects(h.request('products?select=*'), DatabaseConnectionError);
+  assert.equal(h.calls.length, 1);
 });

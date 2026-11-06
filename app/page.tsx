@@ -9,6 +9,7 @@ import { loadAllRows } from "./supabase-pagination";
 import { Mutation, SyncJob, SyncQueue, stockMutation } from "./sync-queue";
 import { readWithTimeout } from "./network-read";
 import { createAutoSync } from "./auto-sync";
+import { DatabaseConnectionError, SyncBackoff } from "./sync-backoff";
 
 import { BarcodeLabels } from "./barcode-labels";
 
@@ -322,6 +323,7 @@ export default function Home() {
   const refreshSession = useMemo(() => createSessionRefresher(supabaseConfig), [supabaseConfig]);
   const storeRef = useRef<StoreState>(initialState);
   const syncBusyRef = useRef(false);
+  const syncBackoffRef = useRef(new SyncBackoff());
   const pendingWriteRef = useRef(false);
   const localWriteVersionRef = useRef(0);
   const inventoryReadRef = useRef<AbortController | null>(null);
@@ -529,6 +531,7 @@ export default function Home() {
         setSyncStatus("Offline. Changes saved on this device; automatic sync resumes when connected.");
         return;
       }
+      if (syncBackoffRef.current.remaining() > 0) return;
       if (syncBusyRef.current) {
         automaticSync.request();
         return;
@@ -536,7 +539,8 @@ export default function Home() {
       syncBusyRef.current = true;
       try {
         const uploaded = await pushLocalToSupabase();
-        await loadFromSupabase(uploaded);
+        const downloaded = await loadFromSupabase(uploaded);
+        if (uploaded && downloaded) syncBackoffRef.current.reset();
       } finally {
         syncBusyRef.current = false;
       }
@@ -546,7 +550,7 @@ export default function Home() {
     const syncWhenOnline = () => automaticSync.request();
     syncWhenOnline();
     const interval = window.setInterval(syncWhenOnline, 2000);
-    const handleOnline = syncWhenOnline;
+    const handleOnline = () => { syncBackoffRef.current.reset(); syncWhenOnline(); };
     const handleFocus = syncWhenOnline;
     const handleVisible = () => {
       if (document.visibilityState === "visible") {
@@ -597,7 +601,8 @@ export default function Home() {
     }
 
     const execute = async (signal?: AbortSignal): Promise<T> => {
-      const send = (token: string) => fetch(`${supabaseConfig.url}/rest/v1/${path}`, {
+      const [table, query = ""] = path.split("?");
+      const send = (token: string) => fetch(`/api/database?table=${encodeURIComponent(table)}&${query}`, {
         ...init,
         signal,
         headers: {
@@ -618,6 +623,9 @@ export default function Home() {
       }
 
       if (!response.ok) {
+        if ([408, 429, 502, 503, 504, 520, 522, 524].includes(response.status)) {
+          throw new DatabaseConnectionError();
+        }
         const message = await response.text();
         throw new Error(message || `Supabase request failed with ${response.status}`);
       }
@@ -628,9 +636,17 @@ export default function Home() {
 
       return response.json() as Promise<T>;
     };
-    return (init.method ?? "GET") === "GET"
-      ? readWithTimeout(execute, init.signal)
-      : execute(init.signal ?? undefined);
+    if (syncBackoffRef.current.remaining() > 0) throw new DatabaseConnectionError();
+    try {
+      return await readWithTimeout(execute, init.signal);
+    } catch (error) {
+      if (error instanceof TypeError || error instanceof DatabaseConnectionError ||
+          (error instanceof Error && ["AbortError", "TimeoutError"].includes(error.name))) {
+        if (!init.signal?.aborted) syncBackoffRef.current.fail();
+        throw new DatabaseConnectionError();
+      }
+      throw error;
+    }
   }
 
   async function validSession(session: AuthSession, force = false): Promise<AuthSession> {
@@ -887,11 +903,13 @@ export default function Home() {
         };
       });
       if (reportStatus) setSyncStatus(mutationQueueRef.current?.jobs.length ? "Shared updates received; " + mutationQueueRef.current.jobs.length + " local changes pending review" : "Synced with shared database");
+      return true;
     } catch (error) {
       readController.abort();
-      setSyncStatus(error instanceof TypeError || (error instanceof Error && ["AbortError", "TimeoutError"].includes(error.name))
-        ? "Download interrupted. Existing records kept; retrying when the POS is active and online."
+      setSyncStatus(error instanceof DatabaseConnectionError || error instanceof TypeError || (error instanceof Error && ["AbortError", "TimeoutError"].includes(error.name))
+        ? "Connection interrupted. Existing records kept; automatic sync will retry in up to 60 seconds."
         : error instanceof Error ? `Supabase load failed: ${error.message}` : "Supabase load failed");
+      return false;
     } finally {
       if (inventoryReadRef.current === readController) inventoryReadRef.current = null;
     }
@@ -955,7 +973,9 @@ export default function Home() {
       return queue.jobs.length === 0;
     } catch (error) {
       pendingWriteRef.current = false;
-      setSyncStatus(error instanceof Error ? `Sync needs attention: ${error.message}` : "Pending changes kept locally");
+      setSyncStatus(error instanceof DatabaseConnectionError
+        ? "Connection interrupted. Changes saved only on this device; automatic sync will retry in up to 60 seconds. Do not clear application data."
+        : error instanceof Error ? `Sync needs attention: ${error.message}` : "Pending changes kept locally");
       return false;
     } finally {
       // A conflict on one item must not freeze updates to already-synced products.
@@ -1586,6 +1606,7 @@ export default function Home() {
   ];
   const activeTabMeta = tabs.find((tab) => tab.key === activeTab) ?? tabs[0];
   const isAdmin = store.settings.userRole === "Admin";
+  const syncConnectionInterrupted = /connection interrupted|^offline/i.test(syncStatus);
   const syncNeedsAttention = /failed|conflict|attention|pending review|recovery|could not|not ready|only on this device|only on this laptop|sign in to back up/i.test(syncStatus);
 
   if (isCustomerDisplay) {
@@ -1660,9 +1681,9 @@ export default function Home() {
           <header className="app-header">
             <h2>{activeTabMeta.label}</h2>
             <div className="user-info">
-              <div title={syncStatus} className={`connection-status ${hasSupabase() && !syncNeedsAttention ? "online" : "offline"}`}>
+              <div title={syncStatus} className={`connection-status ${hasSupabase() && !syncNeedsAttention && !syncConnectionInterrupted ? "online" : "offline"}`}>
                 <span className="status-dot" />
-                <span role="status">{syncNeedsAttention ? "Needs attention" : hasSupabase() ? "Connected" : "Offline"}</span>
+                <span role="status">{syncConnectionInterrupted ? "Reconnecting" : syncNeedsAttention ? "Needs attention" : hasSupabase() ? "Connected" : "Offline"}</span>
               </div>
               <div className="user-icon">PG</div>
               <span>{store.settings.cashier}</span>

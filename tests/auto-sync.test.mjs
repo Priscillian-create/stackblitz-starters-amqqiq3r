@@ -69,6 +69,7 @@ test('app syncs at startup, every two seconds, after saves and reconnecting', as
     localReady: true, authSession: {}, hasSupabase: () => true,
     supabaseConfig: { url: 'https://database.test', anonKey: 'public' },
     navigator: { onLine: true }, syncBusyRef: { current: false },
+    syncBackoffRef: { current: { remaining: () => 0, reset: () => {} } },
     inventoryReadRef: { current: null }, setSyncStatus: () => {},
     pushLocalToSupabase: async () => { pushes++; return true; },
     loadFromSupabase: async () => { pulls++; },

@@ -3,6 +3,7 @@ import { readFile } from 'node:fs/promises';
 import { stripTypeScriptTypes } from 'node:module';
 import vm from 'node:vm';
 import test from 'node:test';
+import { DatabaseConnectionError } from '../app/sync-backoff.ts';
 
 // Exercise the app's actual download function with delayed network responses.
 async function harness() {
@@ -16,7 +17,7 @@ async function harness() {
   const current = { products: [{ id: 'new', name: 'GALVUS MET' }], sales: [], customers: [], expenses: [] };
   const context = {
     pendingWriteRef: { current: false }, mutationQueueRef: { current: { jobs: [] } },
-    inventoryReadRef: { current: null }, AbortController,
+    inventoryReadRef: { current: null }, AbortController, DatabaseConnectionError,
     blockPullUntilRef: { current: 0 }, localWriteVersionRef: { current: 0 },
     storeRef: { current }, protectedProductIdsRef: { current: new Set() },
     deletedProductIdsRef: { current: new Set() }, deletedSaleIdsRef: { current: new Set() },
