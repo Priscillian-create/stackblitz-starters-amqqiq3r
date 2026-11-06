@@ -40,11 +40,11 @@ test('price edit patches only the changed field without old stock/price/cost gua
   assert.deepEqual(JSON.parse(h.calls[0].init.body), { price: 10 });
 });
 
-test('offline and unconfirmed saves reject rather than report success', async () => {
+test('browser offline hint does not block a reachable database; unconfirmed saves still reject', async () => {
   const h = persistence();
   h.context.navigator.onLine = false;
-  await assert.rejects(h.save(product), /No internet/);
-  assert.equal(h.calls.length, 0);
+  assert.deepEqual(await h.save(product), product);
+  assert.equal(h.calls.length, 1);
   h.context.navigator.onLine = true;
   h.context.supabaseRequest = async () => [];
   await assert.rejects(h.save(product), /Database did not confirm/);
@@ -86,6 +86,6 @@ test('failed database save retains form and creates no phantom local product', a
   h.reject(new DatabaseConnectionError()); await saving;
   assert.equal(h.context.storeRef.current.products.length, 0);
   assert.equal(h.state().closed, false); assert.equal(h.state().reset, false);
-  assert.equal(h.state().writes, 0); assert.match(h.state().error, /Could not confirm/);
+  assert.equal(h.state().writes, 0); assert.match(h.state().error, /Could not reach the server/);
   assert.equal(h.context.productSaveBusyRef.current, false);
 });

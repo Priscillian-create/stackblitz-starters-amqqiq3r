@@ -509,7 +509,7 @@ export default function Home() {
     if (!authSession || !hasSupabase()) return;
     void loadUserProfile(authSession);
     const renew = () => {
-      if (navigator.onLine && authSessionRef.current) {
+      if (authSessionRef.current) {
         void validSession(authSessionRef.current).catch((error) => {
           setSyncStatus(error instanceof Error ? error.message : "Unable to renew login");
         });
@@ -531,10 +531,6 @@ export default function Home() {
     if (!localReady || !authSession || !hasSupabase()) return;
 
     const automaticSync = createAutoSync(async () => {
-      if (!navigator.onLine) {
-        setSyncStatus("Offline. Changes saved on this device; automatic sync resumes when connected.");
-        return;
-      }
       if (syncBackoffRef.current.remaining() > 0) return;
       if (syncBusyRef.current) {
         automaticSync.request();
@@ -912,7 +908,7 @@ export default function Home() {
     } catch (error) {
       readController.abort();
       setSyncStatus(error instanceof DatabaseConnectionError || error instanceof TypeError || (error instanceof Error && ["AbortError", "TimeoutError"].includes(error.name))
-        ? "Connection interrupted. Existing records kept; automatic sync will retry in up to 60 seconds."
+        ? "Server connection unavailable. This does not necessarily mean your internet is offline. Existing records are kept; retrying automatically."
         : error instanceof Error ? `Supabase load failed: ${error.message}` : "Supabase load failed");
       return false;
     } finally {
@@ -940,11 +936,11 @@ export default function Home() {
       window.localStorage.removeItem(pendingSyncStorageKey);
       return true;
     }
-    if (!hasSupabase() || !navigator.onLine || !authSessionRef.current) {
+    if (!hasSupabase() || !authSessionRef.current) {
       pendingWriteRef.current = false;
       setSyncStatus(!authSessionRef.current
         ? "Sign in to back up pending changes. Saved only on this device; do not clear application data."
-        : "Offline changes queued. Saved only on this device until uploaded; do not clear application data.");
+        : "Database configuration unavailable. Pending changes are kept on this device.");
       return false;
     }
     try {
@@ -979,7 +975,7 @@ export default function Home() {
     } catch (error) {
       pendingWriteRef.current = false;
       setSyncStatus(error instanceof DatabaseConnectionError
-        ? "Connection interrupted. Changes saved only on this device; automatic sync will retry in up to 60 seconds. Do not clear application data."
+        ? "Server connection unavailable. Pending changes remain on this device and will retry automatically. Do not clear application data."
         : error instanceof InventoryConflictError
           ? "Stock or product edit needs review: " + error.productIds.map((id) =>
               storeRef.current.products.find((product) => product.id === id)?.name || id,
@@ -997,7 +993,6 @@ export default function Home() {
 
   async function persistProduct(product: Product, previous?: Product): Promise<Product> {
     if (!authSessionRef.current) throw new Error("Please sign in before saving a product.");
-    if (!navigator.onLine) throw new Error("No internet connection. Product has not been saved. Keep this form open and try again when connected.");
     // Finish older queued product submissions before the newer direct save.
     await pushLocalToSupabase();
     if (mutationQueueRef.current?.jobs.some((job) => job.kind === "product-edit" && job.productIds.includes(product.id))) {
@@ -1463,7 +1458,7 @@ export default function Home() {
       setIsProductFormOpen(false);
     } catch (error) {
       setProductSaveError(error instanceof DatabaseConnectionError
-        ? "Could not confirm the database save. Your form is kept. Check the connection and retry; do not clear application data."
+        ? "Could not reach the server to confirm this save. Your internet may still be working. Your form is kept; please retry when pagerry.com is reachable."
         : error instanceof Error ? error.message : "Product could not be saved. Please try again.");
     } finally {
       productSaveBusyRef.current = false;
@@ -1654,7 +1649,7 @@ export default function Home() {
   ];
   const activeTabMeta = tabs.find((tab) => tab.key === activeTab) ?? tabs[0];
   const isAdmin = store.settings.userRole === "Admin";
-  const syncConnectionInterrupted = /connection interrupted|^offline/i.test(syncStatus);
+  const syncConnectionInterrupted = /connection interrupted|server connection unavailable|^offline/i.test(syncStatus);
   const syncNeedsAttention = /failed|conflict|attention|pending review|needs review|recovery|could not|not ready|only on this device|only on this laptop|sign in to back up/i.test(syncStatus);
 
   if (isCustomerDisplay) {
@@ -1731,7 +1726,7 @@ export default function Home() {
             <div className="user-info">
               <div title={syncStatus} className={`connection-status ${hasSupabase() && !syncNeedsAttention && !syncConnectionInterrupted ? "online" : "offline"}`}>
                 <span className="status-dot" />
-                <span role="status">{syncConnectionInterrupted ? "Reconnecting" : syncNeedsAttention ? "Needs attention" : hasSupabase() ? "Connected" : "Offline"}</span>
+                <span role="status">{syncConnectionInterrupted ? "Server unavailable" : syncNeedsAttention ? "Needs attention" : hasSupabase() ? "Connected" : "Connecting"}</span>
               </div>
               <div className="user-icon">PG</div>
               <span>{store.settings.cashier}</span>

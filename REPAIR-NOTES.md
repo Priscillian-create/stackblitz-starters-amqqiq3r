@@ -29,3 +29,6 @@ Conflict messages now list affected product names. Independent new products cont
 
 ## Direct database product saves (current behavior)
 Add Product and Edit Product now wait for the database response. The form shows Saving to database and closes only after exactly one matching product row is returned. Failed/offline requests keep the form and show an error; they do not create a locally saved product that merely looks uploaded. Editing compares against the form's opening snapshot and sends only changed fields with an ID filter. Ordinary product edits use the latest explicitly submitted field values instead of stock/price/cost comparison conflicts. Older queued product-form submissions are upgraded on startup and retried automatically; sale/refund stock comparison guards remain intact. Background refresh pauses while a product save is in progress. Local storage is a cache after a successful product save, not the authority.
+
+## Server reachability and offline detection
+The app no longer blocks saves, retries, or session renewal solely because navigator.onLine reports false. Actual requests determine success or failure. Connection errors now say Server unavailable rather than claiming the internet is offline. This cannot repair a domain, hosting, or network-route failure that prevents the browser from reaching pagerry.com itself.

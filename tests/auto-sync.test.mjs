@@ -93,8 +93,8 @@ test('app syncs at startup, every two seconds, after saves and reconnecting', as
   interval(); events.get('pos-data-changed')(); events.get('online')(); events.get('focus')(); documentEvents.get('visibilitychange')();
   assert.equal(requests, 6);
   context.navigator.onLine = false;
-  await run(); assert.equal(pushes, 0);
+  await run(); assert.equal(pushes, 1);
   context.navigator.onLine = true;
-  await run(); assert.equal(pushes, 1); assert.equal(pulls, 1);
+  await run(); assert.equal(pushes, 2); assert.equal(pulls, 2);
   cleanup(); assert.equal(stopped, true); assert.equal(events.size, 0);
 });
