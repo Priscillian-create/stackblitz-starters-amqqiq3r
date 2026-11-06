@@ -7,6 +7,7 @@ export type Mutation = {
 export type SyncJob = {
   id: string;
   kind?: "product-edit";
+  productSnapshot?: Record<string, unknown>;
   productIds: string[];
   deletedProductIds?: string[];
   deletedSaleIds?: string[];
@@ -54,8 +55,8 @@ export class SyncQueue {
     if (migrated) this.save(JSON.stringify(this.jobs));
   }
   enqueue(job: SyncJob) {
+    this.save(JSON.stringify([...this.jobs, job]));
     this.jobs.push(job);
-    this.save(JSON.stringify(this.jobs));
   }
   flush(send: (mutation: Mutation) => Promise<unknown>) {
     if (this.running) return this.running;

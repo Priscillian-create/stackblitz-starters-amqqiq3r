@@ -9,6 +9,7 @@ import { loadAllRows } from "./supabase-pagination";
 import { InventoryConflictError, Mutation, SyncJob, SyncQueue, stockMutation } from "./sync-queue";
 import { readWithTimeout } from "./network-read";
 import { createAutoSync } from "./auto-sync";
+import { restorePendingProductRows } from "./pending-products";
 import { DatabaseConnectionError, SyncBackoff } from "./sync-backoff";
 
 import { BarcodeLabels } from "./barcode-labels";
@@ -411,6 +412,12 @@ export default function Home() {
       if (saved) window.localStorage.setItem("pa-gerry-legacy-pending-backup", saved);
       window.localStorage.removeItem(pendingSyncStorageKey);
     }
+    const recoveredProducts = restorePendingProductRows(
+      storeRef.current.products.map(productToRow), mutationQueueRef.current.jobs,
+    ).map((row) => productFromRow(row as SupabaseProduct));
+    const recoveredStore = { ...storeRef.current, products: recoveredProducts };
+    storeRef.current = recoveredStore;
+    setStore(recoveredStore);
     hasUnsyncedWritesRef.current = mutationQueueRef.current.jobs.length > 0;
     mutationQueueRef.current.jobs.forEach((job) => {
       job.productIds.forEach((id) => protectedProductIdsRef.current.add(id));
@@ -991,31 +998,47 @@ export default function Home() {
     }
   }
 
-  async function persistProduct(product: Product, previous?: Product): Promise<Product> {
+  async function persistProduct(product: Product, previous?: Product): Promise<{ product: Product; savedToDatabase: boolean }> {
     if (!authSessionRef.current) throw new Error("Please sign in before saving a product.");
-    // Finish older queued product submissions before the newer direct save.
-    await pushLocalToSupabase();
-    if (mutationQueueRef.current?.jobs.some((job) => job.kind === "product-edit" && job.productIds.includes(product.id))) {
-      throw new Error("An earlier save of this product has not reached the database. Please retry when the connection is available.");
-    }
     const previousRow = previous ? productToRow(previous) : undefined;
     const editedFields = Object.fromEntries(Object.entries(productToRow(product)).filter(([key, value]) =>
       key !== "id" && (!previousRow || !sameJson(value, previousRow[key as keyof SupabaseProduct])),
     ));
-    // Save explicit form edits directly; an unrelated stock change cannot reject
-    // a name/price edit. Unchanged fields are not sent back to the database.
-    const rows = await supabaseRequest<SupabaseProduct[]>(
-      previous ? `products?id=eq.${encodeURIComponent(product.id)}` : "products?on_conflict=id",
-      {
-        method: previous ? "PATCH" : "POST",
-        headers: { Prefer: previous ? "return=representation" : "resolution=merge-duplicates,return=representation" },
-        body: JSON.stringify(previous ? editedFields : [productToRow(product)]),
-      },
-    );
-    if (!Array.isArray(rows) || rows.length !== 1 || rows[0].id !== product.id) {
-      throw new Error("Database did not confirm this product. It may have been deleted or your account lacks permission. Your form has been kept.");
+    const mutation: Mutation = {
+      path: previous ? `products?id=eq.${encodeURIComponent(product.id)}` : "products?on_conflict=id",
+      method: previous ? "PATCH" : "POST",
+      body: previous ? editedFields : [productToRow(product)],
+      requireMatch: true,
+    };
+    const saveOnDevice = () => {
+      const queue = mutationQueueRef.current;
+      if (!queue) throw new Error("Device storage is not ready. Keep the form open and retry.");
+      // Persist the complete recovery snapshot with the mutation before reporting saved.
+      queue.enqueue({ id: crypto.randomUUID(), kind: "product-edit", productIds: [product.id],
+        productSnapshot: productToRow(product), mutations: [mutation] });
+      protectProducts([product.id]);
+      markLocalWrite();
+      return { product, savedToDatabase: false };
+    };
+    // An offline hint queues immediately but never disables background requests.
+    // Preserve ordering when an earlier creation/edit of this product is pending.
+    if (navigator.onLine === false || mutationQueueRef.current?.jobs.some((job) => job.productIds.includes(product.id))) {
+      return saveOnDevice();
     }
-    return productFromRow(rows[0]);
+    try {
+      const rows = await supabaseRequest<SupabaseProduct[]>(mutation.path, {
+        method: mutation.method,
+        headers: { Prefer: previous ? "return=representation" : "resolution=merge-duplicates,return=representation" },
+        body: JSON.stringify(mutation.body),
+      });
+      if (!Array.isArray(rows) || rows.length !== 1 || rows[0].id !== product.id) {
+        throw new Error("Database did not confirm this product. It may have been deleted or your account lacks permission. Your form has been kept.");
+      }
+      return { product: productFromRow(rows[0]), savedToDatabase: true };
+    } catch (error) {
+      if (error instanceof DatabaseConnectionError) return saveOnDevice();
+      throw error;
+    }
   }
 
   async function deleteProductFromSupabase(product: Product) {
@@ -1438,7 +1461,8 @@ export default function Home() {
     localWriteVersionRef.current += 1;
     inventoryReadRef.current?.abort();
     try {
-      const saved = await persistProduct(product, editingOriginalRef.current);
+      const result = await persistProduct(product, editingOriginalRef.current);
+      const saved = result.product;
       localWriteVersionRef.current += 1;
       const current = storeRef.current;
       const exists = current.products.some((item) => item.id === saved.id);
@@ -1453,7 +1477,8 @@ export default function Home() {
         window.localStorage.setItem(storageKey, json);
         try { window.localStorage.setItem(storageKey + "-recovery", json); } catch { /* Database save already succeeded. */ }
       } catch { /* The database remains authoritative if the local cache is full. */ }
-      setSyncStatus("Product saved to database");
+      setSyncStatus(result.savedToDatabase ? "Product saved to database"
+        : "Saved on this device — upload pending. It will save to Supabase automatically when the server is reachable. Do not clear application data.");
       resetProductForm();
       setIsProductFormOpen(false);
     } catch (error) {
@@ -1649,6 +1674,7 @@ export default function Home() {
   ];
   const activeTabMeta = tabs.find((tab) => tab.key === activeTab) ?? tabs[0];
   const isAdmin = store.settings.userRole === "Admin";
+  const pendingProductIds = new Set(mutationQueueRef.current?.jobs.filter((job) => job.kind === "product-edit").flatMap((job) => job.productIds) ?? []);
   const syncConnectionInterrupted = /connection interrupted|server connection unavailable|^offline/i.test(syncStatus);
   const syncNeedsAttention = /failed|conflict|attention|pending review|needs review|recovery|could not|not ready|only on this device|only on this laptop|sign in to back up/i.test(syncStatus);
 
@@ -1724,9 +1750,9 @@ export default function Home() {
           <header className="app-header">
             <h2>{activeTabMeta.label}</h2>
             <div className="user-info">
-              <div title={syncStatus} className={`connection-status ${hasSupabase() && !syncNeedsAttention && !syncConnectionInterrupted ? "online" : "offline"}`}>
+              <div title={syncStatus} className={`connection-status ${hasSupabase() && !syncNeedsAttention && !syncConnectionInterrupted && !/upload pending/i.test(syncStatus) ? "online" : "offline"}`}>
                 <span className="status-dot" />
-                <span role="status">{syncConnectionInterrupted ? "Server unavailable" : syncNeedsAttention ? "Needs attention" : hasSupabase() ? "Connected" : "Connecting"}</span>
+                <span role="status">{/upload pending/i.test(syncStatus) ? "Upload pending" : syncConnectionInterrupted ? "Server unavailable" : syncNeedsAttention ? "Needs attention" : hasSupabase() ? "Connected" : "Connecting"}</span>
               </div>
               <div className="user-icon">PG</div>
               <span>{store.settings.cashier}</span>
@@ -1969,6 +1995,7 @@ export default function Home() {
                         <strong>{product.name}</strong>
                         <span>{product.category}</span>
                         <small>SKU: {product.sku || "-"} | Barcode: {product.barcode || "-"}</small>
+                        {pendingProductIds.has(product.id) && <small role="status">Upload pending</small>}
                       </div>
                       <div className="inventory-product-facts">
                         <span><b>Stock</b>{product.stock} {product.unit}</span>
@@ -2036,7 +2063,7 @@ export default function Home() {
                   </label>
                   {productSaveError && <p role="alert">{productSaveError}</p>}
                   <div className="product-dashboard-actions">
-                    <button className="primary-button" disabled={productSaveBusy}>{productSaveBusy ? "Saving to database…" : "Save Product"}</button>
+                    <button className="primary-button" disabled={productSaveBusy}>{productSaveBusy ? "Saving…" : "Save Product"}</button>
                     <button type="button" className="secondary-button" onClick={() => resetProductForm()}>Clear Form</button>
                   </div>
                   </fieldset>

@@ -110,3 +110,9 @@ test('old product form edits retry automatically without turning sale stock guar
   await queue.flush(async mutation => { paths.push(mutation.path); return [{}]; });
   assert.deepEqual(paths, ['products?id=eq.p', 'products?id=eq.sold&stock=eq.5']);
 });
+
+test('storage failure does not enqueue an undurable mutation in memory', () => {
+  const queue = new SyncQueue(null, () => { throw new Error('storage full'); });
+  assert.throws(() => queue.enqueue(job()), /storage full/);
+  assert.equal(queue.jobs.length, 0);
+});
