@@ -8,6 +8,7 @@ import { summarizeCategorySales } from "./category-sales";
 import { loadAllRows } from "./supabase-pagination";
 import { Mutation, SyncJob, SyncQueue, stockMutation } from "./sync-queue";
 import { readWithTimeout } from "./network-read";
+import { createAutoSync } from "./auto-sync";
 
 import { BarcodeLabels } from "./barcode-labels";
 
@@ -319,7 +320,6 @@ export default function Home() {
   const [displaySetupBusy, setDisplaySetupBusy] = useState(false);
   const authSessionRef = useRef<AuthSession | null>(null);
   const refreshSession = useMemo(() => createSessionRefresher(supabaseConfig), [supabaseConfig]);
-  const syncTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const storeRef = useRef<StoreState>(initialState);
   const syncBusyRef = useRef(false);
   const pendingWriteRef = useRef(false);
@@ -524,35 +524,33 @@ export default function Home() {
   useEffect(() => {
     if (!localReady || !authSession || !hasSupabase()) return;
 
-    const syncWhenOnline = (pushFirst = false) => {
+    const automaticSync = createAutoSync(async () => {
       if (!navigator.onLine) {
-        setSyncStatus("Offline changes saved");
+        setSyncStatus("Offline. Changes saved on this device; automatic sync resumes when connected.");
         return;
       }
-      if (syncBusyRef.current) return;
-      if (syncTimer.current) {
-        clearTimeout(syncTimer.current);
+      if (syncBusyRef.current) {
+        automaticSync.request();
+        return;
       }
-      syncTimer.current = setTimeout(async () => {
-        if (!navigator.onLine) return;
-        syncBusyRef.current = true;
-        try {
-          let uploaded = true;
-          if (pushFirst || hasUnsyncedWritesRef.current) uploaded = await pushLocalToSupabase();
-          await loadFromSupabase(uploaded);
-        } finally {
-          syncBusyRef.current = false;
-        }
-      }, 200);
-    };
-
-    syncWhenOnline(false);
-    const interval = window.setInterval(() => syncWhenOnline(false), 5000);
-    const handleOnline = () => syncWhenOnline(true);
-    const handleFocus = () => syncWhenOnline(false);
+      syncBusyRef.current = true;
+      try {
+        const uploaded = await pushLocalToSupabase();
+        await loadFromSupabase(uploaded);
+      } finally {
+        syncBusyRef.current = false;
+      }
+    }, (error) => setSyncStatus(error instanceof Error
+      ? "Automatic sync failed: " + error.message
+      : "Automatic sync failed; pending changes kept locally."));
+    const syncWhenOnline = () => automaticSync.request();
+    syncWhenOnline();
+    const interval = window.setInterval(syncWhenOnline, 2000);
+    const handleOnline = syncWhenOnline;
+    const handleFocus = syncWhenOnline;
     const handleVisible = () => {
       if (document.visibilityState === "visible") {
-        syncWhenOnline(false);
+        syncWhenOnline();
       }
     };
     window.addEventListener("pos-data-changed", handleOnline);
@@ -560,15 +558,13 @@ export default function Home() {
     window.addEventListener("focus", handleFocus);
     document.addEventListener("visibilitychange", handleVisible);
     return () => {
+      automaticSync.stop();
       window.clearInterval(interval);
       window.removeEventListener("pos-data-changed", handleOnline);
       window.removeEventListener("online", handleOnline);
       window.removeEventListener("focus", handleFocus);
       document.removeEventListener("visibilitychange", handleVisible);
       inventoryReadRef.current?.abort();
-      if (syncTimer.current) {
-        clearTimeout(syncTimer.current);
-      }
     };
   // Helpers read current refs; re-creating this timer on inventory renders interrupts syncing.
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -955,8 +951,8 @@ export default function Home() {
         deletedSaleIdsRef.current.clear();
       }
       blockPullUntilRef.current = 0;
-      setSyncStatus("Changes synced");
-      return true;
+      setSyncStatus(queue.jobs.length ? "Changes pending; automatic sync will retry." : "Changes synced automatically");
+      return queue.jobs.length === 0;
     } catch (error) {
       pendingWriteRef.current = false;
       setSyncStatus(error instanceof Error ? `Sync needs attention: ${error.message}` : "Pending changes kept locally");

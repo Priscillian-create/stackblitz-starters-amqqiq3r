@@ -32,9 +32,11 @@ export class SyncQueue {
     this.running = (async () => {
       let conflict: Error | null = null;
       const blocked = new Set<string>();
-      for (const job of [...this.jobs]) {
+      // Read the live queue so edits added during an upload are sent in this pass.
+      for (let index = 0; index < this.jobs.length;) {
+        const job = this.jobs[index];
         const keys = [...job.productIds, ...(job.deletedProductIds ?? [])];
-        if (keys.some((id) => blocked.has(id))) continue;
+        if (keys.some((id) => blocked.has(id))) { index++; continue; }
         while (job.mutations.length) {
           const mutation = job.mutations[0];
           const result = await send(mutation);
@@ -46,7 +48,7 @@ export class SyncQueue {
           job.mutations.shift();
           this.save(JSON.stringify(this.jobs));
         }
-        if (job.mutations.length) continue;
+        if (job.mutations.length) { index++; continue; }
         this.jobs.splice(this.jobs.indexOf(job), 1);
         this.save(JSON.stringify(this.jobs));
       }

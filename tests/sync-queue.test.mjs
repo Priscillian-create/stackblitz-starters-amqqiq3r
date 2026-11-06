@@ -61,3 +61,21 @@ test('a conflicting product does not block unrelated uploads or reorder dependen
   assert.equal(sent.length, 2);
   assert.deepEqual(JSON.parse(saved).map(item => item.id), ['sale', 'dependent']);
 });
+
+test('edits added while an upload is in flight drain automatically in the same flush', async () => {
+  const queue = new SyncQueue(null, () => {});
+  queue.enqueue(job());
+  let release;
+  const blocked = new Promise(resolve => { release = resolve; });
+  const paths = [];
+  const sending = queue.flush(async mutation => {
+    paths.push(mutation.path);
+    if (paths.length === 1) await blocked;
+    return [{}];
+  });
+  queue.enqueue({ id: 'new-edit', productIds: ['new'], mutations: [{ path: 'products?on_conflict=id', method: 'POST', body: [{ id: 'new' }] }] });
+  release();
+  await sending;
+  assert.equal(paths.length, 2);
+  assert.equal(queue.jobs.length, 0);
+});

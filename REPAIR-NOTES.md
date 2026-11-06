@@ -17,3 +17,6 @@ Previously erased browser-only products cannot be recovered by this code change.
 The original schema granted inventory access only to anon. Signed-in tokens use the authenticated role, which needs its own permissions and row policies.
 Run supabase/authenticated-inventory-access.sql in the existing Supabase project SQL Editor, then select Sync now. This adds shared inventory access for authenticated users without deleting records or removing existing policies. Apply only to this shared POS database.
 The application now detects an empty signed-in inventory when records remain visible to anon and reports the permission mismatch before replacing cached data.
+
+## Automatic synchronization
+Saved product, stock, sale, customer, and expense changes upload immediately. Changes queued during an existing upload drain in the same pass. The open, signed-in app checks shared data every two seconds and schedules another pass if a change arrives during sync. It also syncs at startup, on reconnect, on focus, and when the page becomes visible. Offline changes remain queued and retry automatically. Browser background throttling and network speed can delay updates; a closed app cannot keep syncing. Permission errors and inventory conflicts remain visible and require correction rather than silently overwriting other edits.
