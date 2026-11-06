@@ -97,3 +97,16 @@ test('conflict error identifies every blocked product while a new product still 
   assert.deepEqual(uploaded, ['new']);
   assert.equal(queue.jobs.length, 2);
 });
+
+test('old product form edits retry automatically without turning sale stock guards into overwrites', async () => {
+  const oldEdit = { id: 'edit', productIds: ['p'], mutations: [{ path: 'products?id=eq.p&stock=eq.5&price=eq.10&cost=eq.8', method: 'PATCH', requireMatch: true, body: { price: 12 } }] };
+  let saved;
+  const queue = new SyncQueue(JSON.stringify([oldEdit, job()]), json => { saved = json; });
+  assert.equal(queue.jobs[0].kind, 'product-edit');
+  assert.equal(queue.jobs[0].mutations[0].path, 'products?id=eq.p');
+  assert.match(queue.jobs[1].mutations[0].path, /stock=eq.5/);
+  assert.deepEqual(JSON.parse(saved)[0].mutations[0].body, { price: 12 });
+  const paths = [];
+  await queue.flush(async mutation => { paths.push(mutation.path); return [{}]; });
+  assert.deepEqual(paths, ['products?id=eq.p', 'products?id=eq.sold&stock=eq.5']);
+});

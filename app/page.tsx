@@ -304,6 +304,10 @@ export default function Home() {
   const [labelProduct, setLabelProduct] = useState<Product | null>(null);
   const [editingProduct, setEditingProduct] = useState<Product>(emptyProduct());
   const [isProductFormOpen, setIsProductFormOpen] = useState(false);
+  const [productSaveBusy, setProductSaveBusy] = useState(false);
+  const [productSaveError, setProductSaveError] = useState("");
+  const productSaveBusyRef = useRef(false);
+  const editingOriginalRef = useRef<Product | undefined>(undefined);
   const [expenseDraft, setExpenseDraft] = useState({ title: "", category: "Operations", amount: 0 });
   const [customerDraft, setCustomerDraft] = useState({ name: "", phone: "" });
   const [lastReceipt, setLastReceipt] = useState<Sale | null>(null);
@@ -808,6 +812,7 @@ export default function Home() {
   });
 
   async function loadFromSupabase(reportStatus = true) {
+    if (productSaveBusyRef.current) return false;
     const readVersion = localWriteVersionRef.current;
     const readController = new AbortController();
     inventoryReadRef.current = readController;
@@ -990,16 +995,32 @@ export default function Home() {
     }
   }
 
-  async function persistProduct(product: Product, previous?: Product) {
+  async function persistProduct(product: Product, previous?: Product): Promise<Product> {
+    if (!authSessionRef.current) throw new Error("Please sign in before saving a product.");
+    if (!navigator.onLine) throw new Error("No internet connection. Product has not been saved. Keep this form open and try again when connected.");
+    // Finish older queued product submissions before the newer direct save.
+    await pushLocalToSupabase();
+    if (mutationQueueRef.current?.jobs.some((job) => job.kind === "product-edit" && job.productIds.includes(product.id))) {
+      throw new Error("An earlier save of this product has not reached the database. Please retry when the connection is available.");
+    }
     const previousRow = previous ? productToRow(previous) : undefined;
     const editedFields = Object.fromEntries(Object.entries(productToRow(product)).filter(([key, value]) =>
       key !== "id" && (!previousRow || !sameJson(value, previousRow[key as keyof SupabaseProduct])),
     ));
-    const mutation: Mutation = previous ? {
-      path: `products?id=eq.${encodeURIComponent(product.id)}&stock=eq.${previous.stock}&price=eq.${previous.price}&cost=eq.${previous.cost}`,
-      method: "PATCH", body: editedFields, requireMatch: true,
-    } : rowMutation("products", [productToRow(product)]);
-    return queueChanges({ productIds: [product.id], mutations: [mutation] });
+    // Save explicit form edits directly; an unrelated stock change cannot reject
+    // a name/price edit. Unchanged fields are not sent back to the database.
+    const rows = await supabaseRequest<SupabaseProduct[]>(
+      previous ? `products?id=eq.${encodeURIComponent(product.id)}` : "products?on_conflict=id",
+      {
+        method: previous ? "PATCH" : "POST",
+        headers: { Prefer: previous ? "return=representation" : "resolution=merge-duplicates,return=representation" },
+        body: JSON.stringify(previous ? editedFields : [productToRow(product)]),
+      },
+    );
+    if (!Array.isArray(rows) || rows.length !== 1 || rows[0].id !== product.id) {
+      throw new Error("Database did not confirm this product. It may have been deleted or your account lacks permission. Your form has been kept.");
+    }
+    return productFromRow(rows[0]);
   }
 
   async function deleteProductFromSupabase(product: Product) {
@@ -1396,43 +1417,59 @@ export default function Home() {
     void deleteSaleFromSupabase(sale, productsAfterRefund);
   }
 
-  function saveProduct(event: FormEvent) {
+  function resetProductForm() {
+    editingOriginalRef.current = undefined;
+    setProductSaveError("");
+    setEditingProduct(emptyProduct());
+  }
+
+  async function saveProduct(event: FormEvent) {
     event.preventDefault();
-    if (!localReady) { setSyncStatus("Local storage is not ready. Download a backup before adding products."); return; }
-    const otherProducts = store.products.filter((item) => item.id !== editingProduct.id);
+    if (productSaveBusyRef.current) return;
+    const otherProducts = storeRef.current.products.filter((item) => item.id !== editingProduct.id);
     const product = {
       ...editingProduct,
       name: editingProduct.name.trim(),
       sku: editingProduct.sku.trim(),
       barcode: editingProduct.barcode.trim(),
     };
-    if (!product.name) return;
+    if (!product.name) { setProductSaveError("Enter a product name."); return; }
     if (!product.sku) product.sku = generateSku(product, otherProducts);
     if (!product.barcode) product.barcode = generateBarcode(otherProducts);
-    markLocalWrite();
-    protectProducts([product.id]);
-    const currentStore = storeRef.current;
-    const exists = currentStore.products.some((item) => item.id === product.id);
-    const nextStore = {
-      ...currentStore,
-      products: exists
-        ? currentStore.products.map((item) => (item.id === product.id ? product : item))
-        : [product, ...currentStore.products],
-    };
-    // Commit before closing the form, so an immediate refresh retains the item.
+    setEditingProduct(product);
+    productSaveBusyRef.current = true;
+    setProductSaveBusy(true);
+    setProductSaveError("");
+    localWriteVersionRef.current += 1;
+    inventoryReadRef.current?.abort();
     try {
-      const json = JSON.stringify(nextStore);
-      window.localStorage.setItem(storageKey, json);
-      try { window.localStorage.setItem(storageKey + "-recovery", json); } catch { /* Keep the successful primary save. */ }
-    } catch {
-      setSyncStatus("Product could not be saved on this laptop. Free browser storage and try again.");
-      return;
+      const saved = await persistProduct(product, editingOriginalRef.current);
+      localWriteVersionRef.current += 1;
+      const current = storeRef.current;
+      const exists = current.products.some((item) => item.id === saved.id);
+      const next = {
+        ...current,
+        products: exists ? current.products.map((item) => item.id === saved.id ? saved : item) : [saved, ...current.products],
+      };
+      storeRef.current = next;
+      setStore(next);
+      try {
+        const json = JSON.stringify(next);
+        window.localStorage.setItem(storageKey, json);
+        try { window.localStorage.setItem(storageKey + "-recovery", json); } catch { /* Database save already succeeded. */ }
+      } catch { /* The database remains authoritative if the local cache is full. */ }
+      setSyncStatus("Product saved to database");
+      resetProductForm();
+      setIsProductFormOpen(false);
+    } catch (error) {
+      setProductSaveError(error instanceof DatabaseConnectionError
+        ? "Could not confirm the database save. Your form is kept. Check the connection and retry; do not clear application data."
+        : error instanceof Error ? error.message : "Product could not be saved. Please try again.");
+    } finally {
+      productSaveBusyRef.current = false;
+      setProductSaveBusy(false);
+      window.dispatchEvent(new Event("pos-data-changed"));
     }
-    storeRef.current = nextStore;
-    setStore(nextStore);
-    void persistProduct(product, currentStore.products.find((item) => item.id === product.id));
-    setEditingProduct(emptyProduct());
-    setIsProductFormOpen(false);
   }
 
   function deleteProduct(product: Product) {
@@ -1447,7 +1484,7 @@ export default function Home() {
     storeRef.current = nextStore;
     setStore(nextStore);
     if (editingProduct.id === product.id) {
-      setEditingProduct(emptyProduct());
+      resetProductForm();
       setIsProductFormOpen(false);
     }
     void deleteProductFromSupabase(product);
@@ -1729,7 +1766,7 @@ export default function Home() {
                   <button
                     className="primary-button compact"
                     onClick={() => {
-                      setEditingProduct(emptyProduct());
+                      resetProductForm();
                       setActiveTab("inventory");
                     }}
                   >
@@ -1901,7 +1938,7 @@ export default function Home() {
                   type="button"
                   className="inventory-add-button"
                   onClick={() => {
-                    setEditingProduct(emptyProduct());
+                    resetProductForm();
                     setIsProductFormOpen(true);
                   }}
                   aria-label="Add product"
@@ -1948,6 +1985,8 @@ export default function Home() {
                       {isAdmin && (
                         <div className="inventory-row-actions">
                           <button className="table-action" onClick={() => {
+                            editingOriginalRef.current = { ...product };
+                            setProductSaveError("");
                             setEditingProduct(product);
                             setIsProductFormOpen(true);
                           }}>Edit</button>
@@ -1964,6 +2003,7 @@ export default function Home() {
             {isAdmin && isProductFormOpen && (
               <div className="product-modal" role="dialog" aria-modal="true" aria-labelledby="product-form-title">
                 <form className="form-panel product-dashboard" onSubmit={saveProduct}>
+                  <fieldset disabled={productSaveBusy} style={{ display: "contents" }}>
                   <div className="product-dashboard-header">
                     <div>
                       <h2 id="product-form-title">{store.products.some((product) => product.id === editingProduct.id) ? "Edit Product" : "Add Product"}</h2>
@@ -1999,10 +2039,12 @@ export default function Home() {
                     Expiry date
                     <input className="input" type="date" value={editingProduct.expiryDate} onChange={(event) => setEditingProduct({ ...editingProduct, expiryDate: event.target.value })} />
                   </label>
+                  {productSaveError && <p role="alert">{productSaveError}</p>}
                   <div className="product-dashboard-actions">
-                    <button className="primary-button">Save Product</button>
-                    <button type="button" className="secondary-button" onClick={() => setEditingProduct(emptyProduct())}>Clear Form</button>
+                    <button className="primary-button" disabled={productSaveBusy}>{productSaveBusy ? "Saving to database…" : "Save Product"}</button>
+                    <button type="button" className="secondary-button" onClick={() => resetProductForm()}>Clear Form</button>
                   </div>
+                  </fieldset>
                 </form>
               </div>
             )}

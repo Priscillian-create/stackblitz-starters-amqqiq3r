@@ -6,6 +6,7 @@ export type Mutation = {
 };
 export type SyncJob = {
   id: string;
+  kind?: "product-edit";
   productIds: string[];
   deletedProductIds?: string[];
   deletedSaleIds?: string[];
@@ -31,6 +32,26 @@ export class SyncQueue {
     this.save = save;
     this.jobs = saved ? JSON.parse(saved) : [];
     if (!Array.isArray(this.jobs)) throw new Error("Pending changes cannot be read. Export a backup before continuing.");
+    let migrated = false;
+    for (const job of this.jobs) {
+      // Older product-form edits used stock/price/cost compare guards. Ordinary
+      // explicit field edits now use the latest submitted values. Sale stock
+      // mutations retain their quantity guards and are never converted.
+      if (job.mutations.length !== 1 || job.saleIds?.length || job.deletedProductIds?.length) continue;
+      const mutation = job.mutations[0];
+      const query = new URLSearchParams(mutation.path.split("?")[1] || "");
+      if (!mutation.path.startsWith("products?")) continue;
+      const oldFormEdit = mutation.method === "PATCH" && query.has("price") && query.has("cost") && query.has("stock");
+      const newProduct = mutation.method === "POST";
+      if (!oldFormEdit && !newProduct && job.kind !== "product-edit") continue;
+      job.kind = "product-edit";
+      if (oldFormEdit) {
+        for (const key of ["stock", "price", "cost"]) query.delete(key);
+        mutation.path = "products?" + query.toString();
+      }
+      migrated = true;
+    }
+    if (migrated) this.save(JSON.stringify(this.jobs));
   }
   enqueue(job: SyncJob) {
     this.jobs.push(job);

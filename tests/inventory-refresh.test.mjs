@@ -16,6 +16,7 @@ async function harness() {
   const updates = [];
   const current = { products: [{ id: 'new', name: 'GALVUS MET' }], sales: [], customers: [], expenses: [] };
   const context = {
+    productSaveBusyRef: { current: false },
     pendingWriteRef: { current: false }, mutationQueueRef: { current: { jobs: [] } },
     inventoryReadRef: { current: null }, AbortController, DatabaseConnectionError,
     blockPullUntilRef: { current: 0 }, localWriteVersionRef: { current: 0 },
