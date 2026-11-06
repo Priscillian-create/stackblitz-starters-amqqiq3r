@@ -383,12 +383,14 @@ export default function Home() {
     }
     try {
       if (saved) {
-        setStore(normalizeStore(JSON.parse(saved)));
+        const restored = normalizeStore(JSON.parse(saved));
+        storeRef.current = restored;
+        setStore(restored);
       }
     } catch {
       try {
         const recovery = window.localStorage.getItem(storageKey + "-recovery");
-        if (recovery) setStore(normalizeStore(JSON.parse(recovery)));
+        if (recovery) { const restored = normalizeStore(JSON.parse(recovery)); storeRef.current = restored; setStore(restored); }
         else { setSyncStatus("Saved data needs recovery. Export your backup before making changes."); return; }
       } catch { setSyncStatus("Saved data needs recovery. Do not clear browser storage."); return; }
     }
@@ -535,8 +537,9 @@ export default function Home() {
         if (!navigator.onLine) return;
         syncBusyRef.current = true;
         try {
-          if (pushFirst || hasUnsyncedWritesRef.current) await pushLocalToSupabase();
-          await loadFromSupabase();
+          let uploaded = true;
+          if (pushFirst || hasUnsyncedWritesRef.current) uploaded = await pushLocalToSupabase();
+          await loadFromSupabase(uploaded);
         } finally {
           syncBusyRef.current = false;
         }
@@ -608,7 +611,10 @@ export default function Home() {
           ...(init.headers ?? {}),
         },
       });
-      const token = accessToken ?? supabaseConfig.anonKey;
+      const session = authSessionRef.current;
+      const token = accessToken ?? (session
+        ? (await validSession(session)).access_token
+        : supabaseConfig.anonKey);
       let response = await send(token);
       if (response.status === 401 && token !== supabaseConfig.anonKey && authSessionRef.current) {
         const renewed = await validSession(authSessionRef.current, true);
@@ -789,7 +795,7 @@ export default function Home() {
     reorderLevel: product.reorder_level,
   });
 
-  async function loadFromSupabase() {
+  async function loadFromSupabase(reportStatus = true) {
     const readVersion = localWriteVersionRef.current;
     const readController = new AbortController();
     inventoryReadRef.current = readController;
@@ -874,7 +880,7 @@ export default function Home() {
           ...nextData,
         };
       });
-      setSyncStatus(mutationQueueRef.current?.jobs.length ? "Shared updates received; " + mutationQueueRef.current.jobs.length + " local changes pending review" : "Synced with shared database");
+      if (reportStatus) setSyncStatus(mutationQueueRef.current?.jobs.length ? "Shared updates received; " + mutationQueueRef.current.jobs.length + " local changes pending review" : "Synced with shared database");
     } catch (error) {
       readController.abort();
       setSyncStatus(error instanceof TypeError || (error instanceof Error && ["AbortError", "TimeoutError"].includes(error.name))
@@ -905,9 +911,11 @@ export default function Home() {
       window.localStorage.removeItem(pendingSyncStorageKey);
       return true;
     }
-    if (!hasSupabase() || !navigator.onLine) {
+    if (!hasSupabase() || !navigator.onLine || !authSessionRef.current) {
       pendingWriteRef.current = false;
-      setSyncStatus("Offline changes queued");
+      setSyncStatus(!authSessionRef.current
+        ? "Sign in to back up pending changes. Saved only on this device; do not clear application data."
+        : "Offline changes queued. Saved only on this device until uploaded; do not clear application data.");
       return false;
     }
     try {
@@ -1572,7 +1580,7 @@ export default function Home() {
   ];
   const activeTabMeta = tabs.find((tab) => tab.key === activeTab) ?? tabs[0];
   const isAdmin = store.settings.userRole === "Admin";
-  const syncNeedsAttention = /failed|conflict|attention|pending review|recovery|could not|not ready/i.test(syncStatus);
+  const syncNeedsAttention = /failed|conflict|attention|pending review|recovery|could not|not ready|only on this device|only on this laptop|sign in to back up/i.test(syncStatus);
 
   if (isCustomerDisplay) {
     return <CustomerDisplay snapshot={customerDisplay} />;
@@ -1646,7 +1654,7 @@ export default function Home() {
           <header className="app-header">
             <h2>{activeTabMeta.label}</h2>
             <div className="user-info">
-              <div className={`connection-status ${hasSupabase() ? "online" : "offline"}`}>
+              <div title={syncStatus} className={`connection-status ${hasSupabase() && !syncNeedsAttention ? "online" : "offline"}`}>
                 <span className="status-dot" />
                 <span role="status">{syncNeedsAttention ? "Needs attention" : hasSupabase() ? "Connected" : "Offline"}</span>
               </div>
@@ -1663,7 +1671,7 @@ export default function Home() {
                   <button className="table-action" onClick={async () => {
                     if (syncBusyRef.current) return;
                     syncBusyRef.current = true;
-                    try { await pushLocalToSupabase(); await loadFromSupabase(); }
+                    try { const uploaded = await pushLocalToSupabase(); await loadFromSupabase(uploaded); }
                     finally { syncBusyRef.current = false; }
                   }}>Sync now</button>
                   <button className="table-action" onClick={reviewPendingChanges}>Review pending edits</button>

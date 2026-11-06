@@ -7,7 +7,7 @@ import test from 'node:test';
 // Exercise the app's actual download function with delayed network responses.
 async function harness() {
   const source = await readFile(new URL('../app/page.tsx', import.meta.url), 'utf8');
-  const start = source.indexOf('  async function loadFromSupabase()');
+  const start = source.indexOf('  async function loadFromSupabase(');
   const end = source.indexOf('  function queueChanges(', start);
   const code = stripTypeScriptTypes(source.slice(start, end));
   let resolveProducts, rejectProducts;
@@ -93,4 +93,13 @@ test('shared downloads retain a newly added local product while receiving other 
   assert.equal(next.products.length, 2);
   assert.equal(next.products.find(row => row.id === 'new').name, 'GALVUS MET');
   assert.equal(next.products.find(row => row.id === 'other-device').name, 'Remote product');
+});
+
+test('background downloads do not replace an upload failure with a generic status', async () => {
+  const h = await harness();
+  const statuses = [];
+  h.context.setSyncStatus = value => statuses.push(value);
+  h.resolveProducts([]);
+  await h.download(false);
+  assert.equal(statuses.length, 0);
 });
