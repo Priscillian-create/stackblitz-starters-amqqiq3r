@@ -66,3 +66,12 @@ test('relay timeout releases hung database requests for a later automatic retry'
   const result = await pending;
   assert.equal(result.status, 503);
 });
+
+test('relay uses Workers-compatible redirects and blocks the upstream Location', async () => {
+  const result = await proxyDatabaseRequest(request('table=products'), config, async (url, init) => {
+    assert.equal(init.redirect, 'manual');
+    return new Response(null, { status: 307, headers: { Location: 'https://other.test' } });
+  });
+  assert.equal(result.status, 502);
+  assert.equal(result.headers.get('location'), null);
+});

@@ -1,3 +1,11 @@
+# Automatic sync with local saves
+
+Sign in with your existing email and password whenever the POS opens or reloads. Sign-in requires access to Supabase Auth. The open app keeps saving to this device if the shared database is temporarily unreachable.
+
+The POS sends pending changes after each save and checks for shared changes every two seconds while open. It also checks at sign-in, on reconnect, and when you return to the app. The time for another device to show a change depends on the network, server response, and browser scheduling. Connection failures retry automatically. Inventory conflicts still appear under **Sync & backup** for review.
+
+Deploy with the existing Netlify settings. The notes below describe prior versions.
+
 # Product persistence repair
 
 Changes:

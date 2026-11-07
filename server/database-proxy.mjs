@@ -28,9 +28,13 @@ export async function proxyDatabaseRequest(request, config, send = fetch) {
   const timeout = setTimeout(() => controller.abort(), 15_000);
   try {
     const response = await send(`${config.url.replace(/\/$/, '')}/rest/v1/${table}?${query}`, {
-      method: request.method, headers, redirect: 'error', signal: controller.signal,
+      method: request.method, headers, redirect: 'manual', signal: controller.signal,
       ...(request.method === 'GET' ? {} : { body: await request.text() }),
     });
+    // Workers only support manual or follow. Never forward credentials to a redirect.
+    if (response.status >= 300 && response.status < 400) {
+      return reply('Unexpected redirect from the database service. Check the configured database URL.', 502);
+    }
     const body = response.status === 204 ? null : await response.text();
     const returnedHeaders = new Headers({ 'Cache-Control': 'no-store' });
     for (const key of ['content-type', 'content-range', 'retry-after']) {

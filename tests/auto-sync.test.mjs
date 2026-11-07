@@ -55,46 +55,56 @@ test('repeated triggers share one scheduled pass and stopping cancels pending wo
 });
 
 import { readFile } from 'node:fs/promises';
-import { stripTypeScriptTypes } from 'node:module';
+
 import vm from 'node:vm';
 
-test('app syncs at startup, every two seconds, after saves and reconnecting', async () => {
+test('POS syncs automatically on startup, saves, polling and reconnect', async () => {
   const source = await readFile(new URL('../app/page.tsx', import.meta.url), 'utf8');
   const start = source.lastIndexOf('  useEffect(() => {', source.indexOf('    const automaticSync = createAutoSync'));
   const end = source.indexOf('\n  useEffect(() => {', start + 5);
-  const events = new Map(), documentEvents = new Map();
-  let effect, run, interval, delay, requests = 0, pushes = 0, pulls = 0, stopped = false;
+  const events = new Map();
+  const documentEvents = new Map();
+  let effect, run, interval;
+  let requests = 0, pushes = 0, pulls = 0, cooldown = 5000, stopped = false;
   const context = {
     useEffect: fn => { effect = fn; },
-    localReady: true, authSession: {}, hasSupabase: () => true,
-    supabaseConfig: { url: 'https://database.test', anonKey: 'public' },
-    navigator: { onLine: true }, syncBusyRef: { current: false },
-    syncBackoffRef: { current: { remaining: () => 0, reset: () => {} } },
-    inventoryReadRef: { current: null }, setSyncStatus: () => {},
+    signedIn: true, localReady: true, hasSupabase: () => true, supabaseConfig: {},
+    authSessionRef: { current: {} }, syncBusyRef: { current: false },
+    syncBackoffRef: { current: { remaining: () => cooldown, reset: () => { cooldown = 0; } } },
+    inventoryReadRef: { current: null },
     pushLocalToSupabase: async () => { pushes++; return true; },
-    loadFromSupabase: async () => { pulls++; },
-    createAutoSync: fn => { run = fn; return { request: () => { requests++; }, stop: () => { stopped = true; } }; },
+    loadFromSupabase: async uploaded => { assert.equal(uploaded, true); pulls++; return true; },
+    createAutoSync: fn => {
+      run = fn;
+      return { request: () => { requests++; }, stop: () => { stopped = true; } };
+    },
     window: {
-      setInterval: (fn, ms) => { interval = fn; delay = ms; return 1; },
+      setInterval: (fn, delay) => { assert.equal(delay, 2000); interval = fn; return 1; },
       clearInterval: () => {},
-      addEventListener: (key, fn) => events.set(key, fn),
-      removeEventListener: key => events.delete(key),
+      addEventListener: (name, fn) => events.set(name, fn),
+      removeEventListener: name => events.delete(name),
     },
     document: {
       visibilityState: 'visible',
-      addEventListener: (key, fn) => documentEvents.set(key, fn),
-      removeEventListener: key => documentEvents.delete(key),
+      addEventListener: (name, fn) => documentEvents.set(name, fn),
+      removeEventListener: name => documentEvents.delete(name),
     },
   };
-  vm.runInNewContext(stripTypeScriptTypes(source.slice(start, end)), context);
+  vm.runInNewContext(source.slice(start, end), context);
   const cleanup = effect();
   assert.equal(requests, 1);
-  assert.equal(delay, 2000);
-  interval(); events.get('pos-data-changed')(); events.get('online')(); events.get('focus')(); documentEvents.get('visibilitychange')();
-  assert.equal(requests, 6);
-  context.navigator.onLine = false;
-  await run(); assert.equal(pushes, 1);
-  context.navigator.onLine = true;
-  await run(); assert.equal(pushes, 2); assert.equal(pulls, 2);
-  cleanup(); assert.equal(stopped, true); assert.equal(events.size, 0);
+  await run();
+  assert.equal(pushes, 0);
+  events.get('online')();
+  await run();
+  assert.equal(pushes, 1);
+  assert.equal(pulls, 1);
+  events.get('pos-data-changed')();
+  interval();
+  assert.equal(requests, 4);
+  cleanup();
+  assert.equal(stopped, true);
+  assert.equal(events.size, 0);
+  assert.equal(documentEvents.size, 0);
+  assert.ok(!source.includes('>Sync now</button>'));
 });

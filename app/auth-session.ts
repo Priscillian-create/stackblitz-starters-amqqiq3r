@@ -35,6 +35,7 @@ export function createSessionRefresher(
       if (!session.refresh_token) throw new SessionExpiredError();
       const response = await request(`${config.url}/auth/v1/token?grant_type=refresh_token`, {
         method: "POST",
+        signal: AbortSignal.timeout(15_000),
         headers: { apikey: config.anonKey, "Content-Type": "application/json" },
         body: JSON.stringify({ refresh_token: session.refresh_token }),
       });

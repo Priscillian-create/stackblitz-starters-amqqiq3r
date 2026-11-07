@@ -1,6 +1,7 @@
 "use client";
 
 import { FormEvent, ReactNode, memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { createAutoSync } from "./auto-sync";
 import { AuthSession, createSessionRefresher, needsSessionRefresh, SessionExpiredError } from "./auth-session";
 import { configureCustomerScreens, DisplayScreen, launchCustomerDisplay } from "./customer-screen";
 import { summarizeCategories } from "./category-summary";
@@ -8,7 +9,6 @@ import { summarizeCategorySales } from "./category-sales";
 import { loadAllRows } from "./supabase-pagination";
 import { InventoryConflictError, Mutation, SyncJob, SyncQueue, stockMutation } from "./sync-queue";
 import { readWithTimeout } from "./network-read";
-import { createAutoSync } from "./auto-sync";
 import { restorePendingProductRows } from "./pending-products";
 import { DatabaseConnectionError, SyncBackoff } from "./sync-backoff";
 
@@ -289,11 +289,11 @@ export default function Home() {
     anonKey: "",
     publishableKey: "",
   });
-  const [authSession, setAuthSession] = useState<AuthSession | null>(null);
+  const [signedIn, setSignedIn] = useState(false);
   const [loginDraft, setLoginDraft] = useState({ email: "", password: "" });
   const [loginStatus, setLoginStatus] = useState("");
   const [loginBusy, setLoginBusy] = useState(false);
-  const [syncStatus, setSyncStatus] = useState("Local mode");
+  const [syncStatus, setSyncStatus] = useState("Connecting to the shared database...");
   const [localReady, setLocalReady] = useState(false);
   const [cart, setCart] = useState<CartLine[]>([]);
   const [query, setQuery] = useState("");
@@ -372,17 +372,8 @@ export default function Home() {
 
   useEffect(() => {
     queueMicrotask(() => {
-    const savedAuth = window.localStorage.getItem(authStorageKey);
-    try {
-      if (savedAuth) {
-        const session = JSON.parse(savedAuth) as AuthSession;
-        authSessionRef.current = session;
-        setAuthSession(session);
-        setLoginDraft((current) => ({ ...current, email: session.user.email ?? "" }));
-      }
-    } catch {
-      window.localStorage.removeItem(authStorageKey);
-    }
+    // Retire credentials persisted by older versions. Inventory uses separate storage.
+    window.localStorage.removeItem(authStorageKey);
     const primary = window.localStorage.getItem(storageKey);
     const saved = primary || window.localStorage.getItem(storageKey + "-recovery");
     if (saved && !window.localStorage.getItem(storageKey + "-before-repairs")) {
@@ -446,12 +437,14 @@ export default function Home() {
             supabaseAnonKey: "",
           },
         }));
-        setSyncStatus("Online backup ready");
       }
     };
 
-    fetch("/api/supabase-config")
-      .then((response) => response.json() as Promise<SupabaseConfig>)
+    fetch("/api/supabase-config", { signal: AbortSignal.timeout(5000) })
+      .then((response) => {
+        if (!response.ok) throw new Error("Configuration service unavailable");
+        return response.json() as Promise<SupabaseConfig>;
+      })
       .then(applySupabaseConfig)
       .catch(() => applySupabaseConfig(fallbackSupabaseConfig));
   }, []);
@@ -513,78 +506,56 @@ export default function Home() {
   }, [localReady, store]);
 
   useEffect(() => {
-    if (!authSession || !hasSupabase()) return;
-    void loadUserProfile(authSession);
-    const renew = () => {
-      if (authSessionRef.current) {
-        void validSession(authSessionRef.current).catch((error) => {
-          setSyncStatus(error instanceof Error ? error.message : "Unable to renew login");
-        });
-      }
-    };
-    const timer = window.setInterval(renew, 30_000);
-    window.addEventListener("online", renew);
-    window.addEventListener("focus", renew);
-    return () => {
-      window.clearInterval(timer);
-      window.removeEventListener("online", renew);
-      window.removeEventListener("focus", renew);
-    };
-  // Helpers read current refs; only session/config changes should renew this subscription.
+    const session = authSessionRef.current;
+    if (!signedIn || !session || !hasSupabase()) return;
+    void loadUserProfile(session);
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [authSession, supabaseConfig.url, supabaseConfig.anonKey]);
+  }, [signedIn, supabaseConfig.url, supabaseConfig.anonKey]);
 
   useEffect(() => {
-    if (!localReady || !authSession || !hasSupabase()) return;
+    if (!localReady || !signedIn || !hasSupabase()) return;
 
     const automaticSync = createAutoSync(async () => {
-      if (syncBackoffRef.current.remaining() > 0) return;
-      if (syncBusyRef.current) {
-        automaticSync.request();
-        return;
-      }
+      if (!authSessionRef.current || syncBusyRef.current || syncBackoffRef.current.remaining() > 0) return;
       syncBusyRef.current = true;
       try {
         const uploaded = await pushLocalToSupabase();
-        const downloaded = await loadFromSupabase(uploaded);
-        if (uploaded && downloaded) syncBackoffRef.current.reset();
+        if (!authSessionRef.current || syncBackoffRef.current.remaining() > 0) return;
+        if (await loadFromSupabase(uploaded)) syncBackoffRef.current.reset();
       } finally {
         syncBusyRef.current = false;
       }
     }, (error) => setSyncStatus(error instanceof Error
-      ? "Automatic sync failed: " + error.message
-      : "Automatic sync failed; pending changes kept locally."));
-    const syncWhenOnline = () => automaticSync.request();
-    syncWhenOnline();
-    const interval = window.setInterval(syncWhenOnline, 2000);
-    const handleOnline = () => { syncBackoffRef.current.reset(); syncWhenOnline(); };
-    const handleFocus = syncWhenOnline;
-    const handleVisible = () => {
-      if (document.visibilityState === "visible") {
-        syncWhenOnline();
-      }
-    };
-    window.addEventListener("pos-data-changed", handleOnline);
-    window.addEventListener("online", handleOnline);
-    window.addEventListener("focus", handleFocus);
-    document.addEventListener("visibilitychange", handleVisible);
+      ? "Automatic sync needs attention: " + error.message
+      : "Automatic sync needs attention. Pending changes are kept on this device."));
+
+    const requestSync = automaticSync.request;
+    const reconnect = () => { syncBackoffRef.current.reset(); requestSync(); };
+    const onVisible = () => { if (document.visibilityState === "visible") requestSync(); };
+
+    requestSync();
+    const interval = window.setInterval(requestSync, 2000);
+    window.addEventListener("pos-data-changed", requestSync);
+    window.addEventListener("online", reconnect);
+    window.addEventListener("focus", requestSync);
+    document.addEventListener("visibilitychange", onVisible);
     return () => {
       automaticSync.stop();
       window.clearInterval(interval);
-      window.removeEventListener("pos-data-changed", handleOnline);
-      window.removeEventListener("online", handleOnline);
-      window.removeEventListener("focus", handleFocus);
-      document.removeEventListener("visibilitychange", handleVisible);
+      window.removeEventListener("pos-data-changed", requestSync);
+      window.removeEventListener("online", reconnect);
+      window.removeEventListener("focus", requestSync);
+      document.removeEventListener("visibilitychange", onVisible);
       inventoryReadRef.current?.abort();
     };
-  // Helpers read current refs; re-creating this timer on inventory renders interrupts syncing.
+  // The scheduler stays active across inventory renders. Helpers read current refs.
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [authSession, localReady, supabaseConfig.url, supabaseConfig.anonKey]);
+  }, [localReady, signedIn, supabaseConfig.url, supabaseConfig.anonKey]);
 
   useEffect(() => {
     if (process.env.NODE_ENV === "production") return;
-    void fetch("/api/sync-diagnostics", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ status: syncStatus, products: store.products.length, signedIn: Boolean(authSession), pending: mutationQueueRef.current?.jobs.length ?? 0, ready: localReady, visibility: document.visibilityState, busy: syncBusyRef.current }) }).catch(() => undefined);
-  }, [syncStatus, store.products.length, authSession, localReady]);
+    void fetch("/api/sync-diagnostics", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ status: syncStatus, products: store.products.length, signedIn, pending: mutationQueueRef.current?.jobs.length ?? 0, ready: localReady, visibility: document.visibilityState, busy: syncBusyRef.current }) }).catch(() => undefined);
+  }, [syncStatus, store.products.length, signedIn, localReady]);
 
   function hasSupabase() {
     return Boolean(supabaseConfig.url && supabaseConfig.anonKey);
@@ -622,7 +593,8 @@ export default function Home() {
       const session = authSessionRef.current;
       const token = accessToken ?? (session
         ? (await validSession(session)).access_token
-        : supabaseConfig.anonKey);
+        : null);
+      if (!token) throw new Error("Sign out and sign in again before syncing. Local changes are kept.");
       let response = await send(token);
       if (response.status === 401 && token !== supabaseConfig.anonKey && authSessionRef.current) {
         const renewed = await validSession(authSessionRef.current, true);
@@ -670,13 +642,11 @@ export default function Home() {
         return authSessionRef.current;
       }
       authSessionRef.current = next;
-      window.localStorage.setItem(authStorageKey, JSON.stringify(next));
-      setAuthSession(next);
       return next;
     } catch (error) {
       if (error instanceof SessionExpiredError && authSessionRef.current === current) {
-        signOut();
-        setLoginStatus(error.message);
+        authSessionRef.current = null;
+        throw new Error("Cloud session expired. Sign out and sign in again before syncing. Local changes are kept.");
       }
       throw error;
     }
@@ -715,21 +685,16 @@ export default function Home() {
         },
       }));
     } catch (error) {
-      setStore((current) => ({
-        ...current,
-        settings: {
-          ...current.settings,
-          cashier: email,
-        },
-      }));
+      if (authSessionRef.current?.user.id !== session.user.id) return;
       setSyncStatus(error instanceof Error ? `User role check failed: ${error.message}` : "User role check failed");
     }
   }
 
   async function signIn(event: FormEvent) {
     event.preventDefault();
+    if (loginBusy) return;
     if (!hasSupabase()) {
-      setLoginStatus("Login needs an internet connection the first time.");
+      setLoginStatus("Sign-in is getting ready. Please try again shortly.");
       return;
     }
 
@@ -737,6 +702,7 @@ export default function Home() {
     setLoginStatus("Signing in...");
     try {
       const response = await fetch(`${supabaseConfig.url}/auth/v1/token?grant_type=password`, {
+        signal: AbortSignal.timeout(15_000),
         method: "POST",
         headers: {
           apikey: supabaseConfig.anonKey,
@@ -748,19 +714,22 @@ export default function Home() {
         }),
       });
 
-      if (!response.ok) {
-        throw new Error("Invalid email or password.");
-      }
+      if ([400, 401, 403].includes(response.status)) throw new Error("Invalid email or password.");
+      if (!response.ok) throw new Error("Sign-in service unavailable. Please try again.");
 
       const session = (await response.json()) as AuthSession;
+      if (!session.access_token || !session.user?.id) throw new Error("Sign-in returned an incomplete session. Please try again.");
       authSessionRef.current = session;
-      setAuthSession(session);
-      window.localStorage.setItem(authStorageKey, JSON.stringify(session));
-      setLoginDraft({ email: session.user.email ?? loginDraft.email, password: "" });
+      setStore((current) => ({ ...current, settings: { ...current.settings, cashier: session.user.email ?? loginDraft.email, userRole: "Cashier" } }));
+      setSignedIn(true);
+      setLoginDraft({ email: "", password: "" });
+      setSyncStatus("Connecting to the shared database...");
       setLoginStatus("");
 
     } catch (error) {
-      setLoginStatus(error instanceof Error ? error.message : "Login failed.");
+      setLoginStatus(error instanceof TypeError || (error instanceof Error && error.name === "TimeoutError")
+        ? "Could not reach the sign-in service. Please try again."
+        : error instanceof Error ? error.message : "Login failed.");
     } finally {
       setLoginBusy(false);
     }
@@ -768,7 +737,10 @@ export default function Home() {
 
   function signOut() {
     authSessionRef.current = null;
-    setAuthSession(null);
+    inventoryReadRef.current?.abort();
+    setSignedIn(false);
+    setLoginDraft({ email: "", password: "" });
+    setLoginStatus("");
     window.localStorage.removeItem(authStorageKey);
     setStore((current) => ({
       ...current,
@@ -834,7 +806,7 @@ export default function Home() {
           "products?select=id&limit=1", { signal: readController.signal }, supabaseConfig.anonKey,
         );
         if (publicRows?.length) {
-          throw new Error("Database permissions hide products from signed-in users. Apply supabase/authenticated-inventory-access.sql in Supabase SQL Editor, then Sync now. Existing local records have been kept.");
+          throw new Error("Database permissions hide products from signed-in users. Apply supabase/authenticated-inventory-access.sql in Supabase SQL Editor, then wait for automatic sync to retry. Existing local records have been kept.");
         }
       }
       // A read started before a save may return after that save succeeds.
@@ -913,9 +885,10 @@ export default function Home() {
       if (reportStatus) setSyncStatus(mutationQueueRef.current?.jobs.length ? "Shared updates received; " + mutationQueueRef.current.jobs.length + " local changes pending review" : "Synced with shared database");
       return true;
     } catch (error) {
+      if (readController.signal.aborted) return false;
       readController.abort();
       setSyncStatus(error instanceof DatabaseConnectionError || error instanceof TypeError || (error instanceof Error && ["AbortError", "TimeoutError"].includes(error.name))
-        ? "Server connection unavailable. This does not necessarily mean your internet is offline. Existing records are kept; retrying automatically."
+        ? "Reconnecting to the shared database. Existing records are kept."
         : error instanceof Error ? `Supabase load failed: ${error.message}` : "Supabase load failed");
       return false;
     } finally {
@@ -927,8 +900,8 @@ export default function Home() {
     if (!mutationQueueRef.current) throw new Error("Local storage is not ready.");
     mutationQueueRef.current.enqueue({ ...job, id: crypto.randomUUID() });
     markLocalWrite();
+    setSyncStatus("Saved on this device. Upload pending.");
     window.dispatchEvent(new Event("pos-data-changed"));
-    return pushLocalToSupabase();
   }
 
   const rowMutation = (table: string, rows: unknown[]): Mutation => ({
@@ -977,12 +950,12 @@ export default function Home() {
         deletedSaleIdsRef.current.clear();
       }
       blockPullUntilRef.current = 0;
-      setSyncStatus(queue.jobs.length ? "Changes pending; automatic sync will retry." : "Changes synced automatically");
+      setSyncStatus(queue.jobs.length ? "Changes pending. Automatic sync will retry." : "Changes uploaded");
       return queue.jobs.length === 0;
     } catch (error) {
       pendingWriteRef.current = false;
       setSyncStatus(error instanceof DatabaseConnectionError
-        ? "Server connection unavailable. Pending changes remain on this device and will retry automatically. Do not clear application data."
+        ? "Reconnecting to the shared database. Pending changes are kept on this device and will upload automatically."
         : error instanceof InventoryConflictError
           ? "Stock or product edit needs review: " + error.productIds.map((id) =>
               storeRef.current.products.find((product) => product.id === id)?.name || id,
@@ -998,47 +971,22 @@ export default function Home() {
     }
   }
 
-  async function persistProduct(product: Product, previous?: Product): Promise<{ product: Product; savedToDatabase: boolean }> {
-    if (!authSessionRef.current) throw new Error("Please sign in before saving a product.");
+  async function persistProduct(product: Product, previous?: Product): Promise<Product> {
     const previousRow = previous ? productToRow(previous) : undefined;
     const editedFields = Object.fromEntries(Object.entries(productToRow(product)).filter(([key, value]) =>
       key !== "id" && (!previousRow || !sameJson(value, previousRow[key as keyof SupabaseProduct])),
     ));
+    if (previous && !Object.keys(editedFields).length) return product;
     const mutation: Mutation = {
       path: previous ? `products?id=eq.${encodeURIComponent(product.id)}` : "products?on_conflict=id",
       method: previous ? "PATCH" : "POST",
       body: previous ? editedFields : [productToRow(product)],
       requireMatch: true,
     };
-    const saveOnDevice = () => {
-      const queue = mutationQueueRef.current;
-      if (!queue) throw new Error("Device storage is not ready. Keep the form open and retry.");
-      // Persist the complete recovery snapshot with the mutation before reporting saved.
-      queue.enqueue({ id: crypto.randomUUID(), kind: "product-edit", productIds: [product.id],
-        productSnapshot: productToRow(product), mutations: [mutation] });
-      protectProducts([product.id]);
-      markLocalWrite();
-      return { product, savedToDatabase: false };
-    };
-    // An offline hint queues immediately but never disables background requests.
-    // Preserve ordering when an earlier creation/edit of this product is pending.
-    if (navigator.onLine === false || mutationQueueRef.current?.jobs.some((job) => job.productIds.includes(product.id))) {
-      return saveOnDevice();
-    }
-    try {
-      const rows = await supabaseRequest<SupabaseProduct[]>(mutation.path, {
-        method: mutation.method,
-        headers: { Prefer: previous ? "return=representation" : "resolution=merge-duplicates,return=representation" },
-        body: JSON.stringify(mutation.body),
-      });
-      if (!Array.isArray(rows) || rows.length !== 1 || rows[0].id !== product.id) {
-        throw new Error("Database did not confirm this product. It may have been deleted or your account lacks permission. Your form has been kept.");
-      }
-      return { product: productFromRow(rows[0]), savedToDatabase: true };
-    } catch (error) {
-      if (error instanceof DatabaseConnectionError) return saveOnDevice();
-      throw error;
-    }
+    queueChanges({ kind: "product-edit", productIds: [product.id],
+      productSnapshot: productToRow(product), mutations: [mutation] });
+    protectProducts([product.id]);
+    return product;
   }
 
   async function deleteProductFromSupabase(product: Product) {
@@ -1461,8 +1409,7 @@ export default function Home() {
     localWriteVersionRef.current += 1;
     inventoryReadRef.current?.abort();
     try {
-      const result = await persistProduct(product, editingOriginalRef.current);
-      const saved = result.product;
+      const saved = await persistProduct(product, editingOriginalRef.current);
       localWriteVersionRef.current += 1;
       const current = storeRef.current;
       const exists = current.products.some((item) => item.id === saved.id);
@@ -1475,20 +1422,15 @@ export default function Home() {
       try {
         const json = JSON.stringify(next);
         window.localStorage.setItem(storageKey, json);
-        try { window.localStorage.setItem(storageKey + "-recovery", json); } catch { /* Database save already succeeded. */ }
-      } catch { /* The database remains authoritative if the local cache is full. */ }
-      setSyncStatus(result.savedToDatabase ? "Product saved to database"
-        : "Saved on this device — upload pending. It will save to Supabase automatically when the server is reachable. Do not clear application data.");
+        try { window.localStorage.setItem(storageKey + "-recovery", json); } catch { /* The saved mutation includes a recovery snapshot. */ }
+      } catch { /* The saved mutation includes a recovery snapshot. */ }
       resetProductForm();
       setIsProductFormOpen(false);
     } catch (error) {
-      setProductSaveError(error instanceof DatabaseConnectionError
-        ? "Could not reach the server to confirm this save. Your internet may still be working. Your form is kept; please retry when pagerry.com is reachable."
-        : error instanceof Error ? error.message : "Product could not be saved. Please try again.");
+      setProductSaveError(error instanceof Error ? error.message : "Product could not be saved. Please try again.");
     } finally {
       productSaveBusyRef.current = false;
       setProductSaveBusy(false);
-      window.dispatchEvent(new Event("pos-data-changed"));
     }
   }
 
@@ -1544,7 +1486,9 @@ export default function Home() {
     const queue = mutationQueueRef.current;
     if (!queue?.jobs.length) { setSyncStatus("No pending changes"); return; }
     if (syncBusyRef.current) return;
+    if (!authSessionRef.current) { setSyncStatus("Sign out and sign in again before syncing. Local changes are kept."); return; }
     syncBusyRef.current = true;
+    syncBackoffRef.current.reset();
     try {
       // Upload independent work first and inspect only jobs still pending.
       await pushLocalToSupabase();
@@ -1675,14 +1619,15 @@ export default function Home() {
   const activeTabMeta = tabs.find((tab) => tab.key === activeTab) ?? tabs[0];
   const isAdmin = store.settings.userRole === "Admin";
   const pendingProductIds = new Set(mutationQueueRef.current?.jobs.filter((job) => job.kind === "product-edit").flatMap((job) => job.productIds) ?? []);
-  const syncConnectionInterrupted = /connection interrupted|server connection unavailable|^offline/i.test(syncStatus);
+  const uploadsPending = Boolean(mutationQueueRef.current?.jobs.length);
+  const syncConnectionInterrupted = /connection interrupted|^reconnecting|^connecting/i.test(syncStatus);
   const syncNeedsAttention = /failed|conflict|attention|pending review|needs review|recovery|could not|not ready|only on this device|only on this laptop|sign in to back up/i.test(syncStatus);
 
   if (isCustomerDisplay) {
     return <CustomerDisplay snapshot={customerDisplay} />;
   }
 
-  if (!authSession) {
+  if (!signedIn) {
     return (
       <main className="login-page">
         <form className="login-card" onSubmit={signIn}>
@@ -1691,7 +1636,7 @@ export default function Home() {
             <p>Secure POS Login</p>
           </div>
           <label>
-            Email
+            Email (username)
             <input
               className="input"
               type="email"
@@ -1750,9 +1695,9 @@ export default function Home() {
           <header className="app-header">
             <h2>{activeTabMeta.label}</h2>
             <div className="user-info">
-              <div title={syncStatus} className={`connection-status ${hasSupabase() && !syncNeedsAttention && !syncConnectionInterrupted && !/upload pending/i.test(syncStatus) ? "online" : "offline"}`}>
+              <div title={syncStatus} className={`connection-status ${/synced with shared database/i.test(syncStatus) && !uploadsPending ? "online" : "offline"}`}>
                 <span className="status-dot" />
-                <span role="status">{/upload pending/i.test(syncStatus) ? "Upload pending" : syncConnectionInterrupted ? "Server unavailable" : syncNeedsAttention ? "Needs attention" : hasSupabase() ? "Connected" : "Connecting"}</span>
+                <span role="status">{uploadsPending ? "Upload pending" : syncConnectionInterrupted ? "Reconnecting" : syncNeedsAttention ? "Needs attention" : /synced with shared database/i.test(syncStatus) ? "Synced" : "Syncing"}</span>
               </div>
               <div className="user-icon">PG</div>
               <span>{store.settings.cashier}</span>
@@ -1764,12 +1709,6 @@ export default function Home() {
                 <summary>Sync &amp; backup</summary>
                 <div className="sync-menu-panel">
                   <p>{syncStatus}</p>
-                  <button className="table-action" onClick={async () => {
-                    if (syncBusyRef.current) return;
-                    syncBusyRef.current = true;
-                    try { const uploaded = await pushLocalToSupabase(); await loadFromSupabase(uploaded); }
-                    finally { syncBusyRef.current = false; }
-                  }}>Sync now</button>
                   <button className="table-action" onClick={reviewPendingChanges}>Review pending edits</button>
                   <button className="table-action" onClick={exportData}>Download backup</button>
                 </div>

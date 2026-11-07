@@ -13,6 +13,7 @@ async function harness(accept = true) {
   const guards = [];
   const context = {
     mutationQueueRef: { current: queue }, syncBusyRef: { current: false },
+    authSessionRef: { current: {} }, syncBackoffRef: { current: { reset() {} } },
     setSyncStatus: () => {}, URLSearchParams,
     mutationQueueStorageKey: 'queue',
     window: { localStorage: { setItem: () => {} }, confirm: () => { prompts++; return accept; } },
